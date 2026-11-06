@@ -10,7 +10,7 @@ import { normalizeDirectorResponse } from './repair';
 import { snapEvents, finalizeCandidates } from './snap';
 
 /**
- * Converts a Blob to a raw base64 string.
+ * Converts a Blob to a raw base64 string safely.
  */
 async function blobToBase64(blob: Blob): Promise<string> {
   const arrayBuffer = await blob.arrayBuffer();
@@ -23,6 +23,63 @@ async function blobToBase64(blob: Blob): Promise<string> {
     binary += String.fromCharCode.apply(null, chunk as unknown as number[]);
   }
   return btoa(binary);
+}
+
+/**
+ * Selects at most maxCount evenly spaced items from array.
+ */
+export function selectEquallySpacedSamples<T>(samples: T[], maxCount = 60): T[] {
+  if (samples.length <= maxCount) return samples;
+  const result: T[] = [];
+  const step = (samples.length - 1) / (maxCount - 1);
+  for (let i = 0; i < maxCount; i++) {
+    const index = Math.min(samples.length - 1, Math.round(i * step));
+    result.push(samples[index]);
+  }
+  return result;
+}
+
+/**
+ * Re-encodes frame JPEG to targetWidth (320px) and quality (0.6) for smaller payload.
+ */
+export async function resampleFrameJpeg(
+  originalBlob: Blob,
+  targetWidth = 320,
+  quality = 0.6
+): Promise<Blob> {
+  if (typeof window === 'undefined' || typeof document === 'undefined') {
+    return originalBlob;
+  }
+  return new Promise((resolve) => {
+    const img = new Image();
+    const url = URL.createObjectURL(originalBlob);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const aspect = img.height / (img.width || 1);
+      const targetHeight = Math.max(1, Math.round(targetWidth * aspect));
+      const canvas = document.createElement('canvas');
+      canvas.width = targetWidth;
+      canvas.height = targetHeight;
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        ctx.drawImage(img, 0, 0, targetWidth, targetHeight);
+        canvas.toBlob(
+          (resizedBlob) => {
+            resolve(resizedBlob || originalBlob);
+          },
+          'image/jpeg',
+          quality
+        );
+      } else {
+        resolve(originalBlob);
+      }
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      resolve(originalBlob);
+    };
+    img.src = url;
+  });
 }
 
 export const DIRECTOR_SCHEMA = {
@@ -82,9 +139,6 @@ export const DIRECTOR_SCHEMA = {
   ],
 };
 
-/**
- * Builds the complete instructions prompt for the AI Director.
- */
 export function buildDirectorInstructionPrompt(bundle: AnalysisBundle): string {
   const cutsStr = bundle.cuts
     .slice(0, 80)
@@ -127,32 +181,18 @@ export interface DirectorDirectorResult {
   removedCount: number;
 }
 
-/**
- * Runs the Gemini AI Director on an analysis bundle:
- * 1. Checks payload limit (<= 18MB)
- * 2. Prepares multimodal parts in exact order: intro -> audio -> frames -> instructions
- * 3. Calls Gemini REST API
- * 4. Normalizes and repairs response (with 1-time retry if JSON invalid)
- * 5. Snaps candidates to scene cuts & transients
- * 6. Finalizes candidates (filters speech, duplicate types, proximity, low confidence)
- * 7. Returns SfxPlan
- */
 export async function runAiDirector(
   bundle: AnalysisBundle,
   options: RunAiDirectorOptions
 ): Promise<DirectorDirectorResult> {
   const { apiKey, preferredModel, signal, onProgress } = options;
 
-  // 1. Guard against payload exceeding 18 MB
-  if (bundle.stats.payloadMB > 18) {
-    throw new Error(
-      `Payload size ${bundle.stats.payloadMB} MB exceeds Gemini 18 MB limit. Consider a shorter video.`
-    );
-  }
+  const prepareStart = performance.now();
+  onProgress?.(`Optimizing payload (max 60 frames @ 320px + audio)...`);
 
-  onProgress?.(`Encoding ${bundle.samples.length} frames & audio for Gemini...`);
+  // Select at most 60 evenly spaced frame samples
+  const sampledFrames = selectEquallySpacedSamples(bundle.samples, 60);
 
-  // (a) Text intro
   const parts: GeminiPart[] = [
     {
       text: `SFX AI Director: Video sound effects analysis.\nVideo duration: ${bundle.duration.toFixed(
@@ -163,8 +203,9 @@ export async function runAiDirector(
     },
   ];
 
-  // (b) Audio as inlineData
+  let audioBytes = 0;
   if (bundle.hasAudio && bundle.audioWav16k) {
+    audioBytes = bundle.audioWav16k.size;
     const audioBase64 = await blobToBase64(bundle.audioWav16k);
     parts.push({
       inlineData: {
@@ -174,10 +215,13 @@ export async function runAiDirector(
     });
   }
 
-  // (c) Sample frames
-  for (const sample of bundle.samples) {
+  let framesBytes = 0;
+  for (const sample of sampledFrames) {
     if (signal?.aborted) throw new Error('Analysis cancelled by user.');
-    const frameBase64 = await blobToBase64(sample.jpeg);
+    const resizedBlob = await resampleFrameJpeg(sample.jpeg, 320, 0.6);
+    framesBytes += resizedBlob.size;
+    const frameBase64 = await blobToBase64(resizedBlob);
+
     parts.push({
       text: `Frame at t=${sample.t.toFixed(2)}s`,
     });
@@ -189,24 +233,39 @@ export async function runAiDirector(
     });
   }
 
-  // (d) Final instruction text
   const instructionPrompt = buildDirectorInstructionPrompt(bundle);
   parts.push({
     text: instructionPrompt,
   });
 
-  const requestBody = buildGeminiGenerateContentBody(parts, DIRECTOR_SCHEMA, 0.2);
+  const requestBody = buildGeminiGenerateContentBody(
+    parts,
+    DIRECTOR_SCHEMA,
+    0.2,
+    preferredModel || 'gemini-3.8-flash'
+  );
 
-  onProgress?.(`Sending ${bundle.samples.length} frames + audio (${bundle.stats.payloadMB} MB) to AI...`);
+  const prepareMs = Math.round(performance.now() - prepareStart);
+  const totalPayloadMB = Number(((audioBytes + framesBytes) / (1024 * 1024)).toFixed(1));
 
-  let responseData: { text: string; modelUsed: string };
+  onProgress?.(
+    `Sending ${sampledFrames.length} frames + audio (${totalPayloadMB} MB) to AI...`
+  );
+
+  const uploadStart = performance.now();
+  let responseData: { text: string; modelUsed: string; attemptsCount: number };
+
   try {
     responseData = await callGeminiGenerateContent(apiKey, requestBody, {
       preferredModel,
       signal,
       onProgress: (prog: GeminiCallProgress) => {
+        const prevText = prog.previousReason
+          ? ` · previous: ${prog.previousReason}`
+          : '';
+        const modelClean = prog.model.replace(/^models\//, '');
         onProgress?.(
-          `Model: ${prog.model} · Waiting for AI response... ${prog.elapsedSeconds}s`
+          `Attempt ${prog.attempt} of ${prog.totalAttempts} · model ${modelClean}${prevText} (${prog.elapsedSeconds}s)`
         );
       },
     });
@@ -214,14 +273,15 @@ export async function runAiDirector(
     throw apiErr;
   }
 
-  // Parsing and normalization with one JSON-repair retry if needed
+  const uploadWaitMs = Math.round(performance.now() - uploadStart);
+
+  const parseStart = performance.now();
   let normalized;
   let rawResponseText = responseData.text;
 
   try {
     normalized = normalizeDirectorResponse(rawResponseText, bundle.duration);
   } catch {
-    // Attempt 1 retry asking specifically for valid JSON
     onProgress?.('AI returned non-JSON text. Retrying with strict JSON instruction...');
     const retryParts = [
       ...parts,
@@ -229,21 +289,38 @@ export async function runAiDirector(
         text: 'Your previous answer was not valid JSON. Return valid JSON only.',
       },
     ];
-    const retryBody = buildGeminiGenerateContentBody(retryParts, DIRECTOR_SCHEMA, 0.2);
+    const retryBody = buildGeminiGenerateContentBody(
+      retryParts,
+      DIRECTOR_SCHEMA,
+      0.2,
+      responseData.modelUsed
+    );
     responseData = await callGeminiGenerateContent(apiKey, retryBody, {
-      preferredModel,
+      preferredModel: responseData.modelUsed,
       signal,
       onProgress: (prog: GeminiCallProgress) => {
-        onProgress?.(
-          `Retrying JSON with ${prog.model}... ${prog.elapsedSeconds}s`
-        );
+        const modelClean = prog.model.replace(/^models\//, '');
+        onProgress?.(`Retrying JSON with ${modelClean}... (${prog.elapsedSeconds}s)`);
       },
     });
     rawResponseText = responseData.text;
     normalized = normalizeDirectorResponse(rawResponseText, bundle.duration);
   }
 
-  onProgress?.(`Received ${normalized.events.length} candidate events from AI.`);
+  const parseMs = Math.round(performance.now() - parseStart);
+
+  const modelClean = responseData.modelUsed.replace(/^models\//, '');
+  console.log('[AI Director]', {
+    prepareMs,
+    uploadWaitMs,
+    parseMs,
+    modelUsed: responseData.modelUsed,
+    attempts: responseData.attemptsCount,
+  });
+
+  onProgress?.(
+    `Prepared in ${prepareMs}ms · AI response in ${uploadWaitMs}ms · Parsed in ${parseMs}ms (${modelClean})`
+  );
 
   // Snap to real cuts and transients
   const cutTimes = bundle.cuts.map((c) => c.t);
@@ -257,7 +334,6 @@ export async function runAiDirector(
     none: snapped.filter((e) => e.snapped === 'none').length,
   };
 
-  // Finalize candidates: speech exclusion, proximity, duplicate types, low confidence
   const finalized = finalizeCandidates(snapped, normalized.speech, bundle.duration);
   const removedCount = snapped.length - finalized.length;
 

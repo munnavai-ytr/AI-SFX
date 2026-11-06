@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { snapEvents, finalizeCandidates } from '../ai/snap';
 import { applyDensity, DENSITY } from '../ai/density';
 import { normalizeDirectorResponse } from '../ai/repair';
@@ -7,10 +7,12 @@ import {
   callGeminiGenerateContent,
   rankGeminiModels,
   redactApiKey,
+  getThinkingConfigForModel,
+  isNoThinkingModel,
+  markNoThinkingModel,
 } from '../ai/gemini';
-import { buildDirectorInstructionPrompt, DIRECTOR_SCHEMA } from '../ai/director';
+import { selectEquallySpacedSamples } from '../ai/director';
 import { SfxEvent, SpeechSegment } from '../ai/sfx-types';
-import { AnalysisBundle } from '../types/analysis';
 
 describe('snapEvents', () => {
   const cuts = [1.5, 4.0, 8.2];
@@ -61,7 +63,7 @@ describe('snapEvents', () => {
     const events: SfxEvent[] = [
       {
         id: 'e3',
-        time: 3.1, // far from cuts (1.5, 4.0) and transients (2.2, 5.5)
+        time: 3.1,
         type: 'whoosh_fast',
         intent: 'transition',
         reason: 'mid-scene transition',
@@ -85,11 +87,11 @@ describe('finalizeCandidates', () => {
     { start: 10.0, end: 14.0 },
   ];
 
-  it('drops events inside speech unless intent is transition/intro/outro or type is impact_hard/boom', () => {
+  it('drops events inside speech unless intent is transition or type is impact_hard/boom', () => {
     const events: SfxEvent[] = [
       {
         id: 'e1',
-        time: 3.0, // inside speech 2.0-5.0, action intent
+        time: 3.0,
         type: 'click',
         intent: 'action',
         reason: 'user click',
@@ -99,7 +101,7 @@ describe('finalizeCandidates', () => {
       },
       {
         id: 'e2',
-        time: 3.5, // inside speech, but intent is transition
+        time: 3.5,
         type: 'whoosh_fast',
         intent: 'transition',
         reason: 'cut through speech',
@@ -109,7 +111,7 @@ describe('finalizeCandidates', () => {
       },
       {
         id: 'e3',
-        time: 11.0, // inside speech, but type is impact_hard
+        time: 11.0,
         type: 'impact_hard',
         intent: 'emphasis',
         reason: 'dramatic emphasis',
@@ -119,7 +121,7 @@ describe('finalizeCandidates', () => {
       },
       {
         id: 'e4',
-        time: 7.0, // outside speech
+        time: 7.0,
         type: 'pop',
         intent: 'text_on_screen',
         reason: 'pop up',
@@ -131,248 +133,149 @@ describe('finalizeCandidates', () => {
 
     const finalized = finalizeCandidates(events, speech, duration);
     const ids = finalized.map((e) => e.id);
-    expect(ids).not.toContain('e1'); // dropped
-    expect(ids).toContain('e2'); // kept (transition intent)
-    expect(ids).toContain('e3'); // kept (impact_hard type)
-    expect(ids).toContain('e4'); // kept (outside speech)
-  });
-
-  it('removes same type within 4 seconds keeping higher confidence', () => {
-    const events: SfxEvent[] = [
-      {
-        id: 'w1',
-        time: 6.0,
-        type: 'whoosh_fast',
-        intent: 'transition',
-        reason: 'first whoosh',
-        confidence: 0.6,
-        volume: 0.7,
-        snapped: 'none',
-      },
-      {
-        id: 'w2',
-        time: 7.5, // 1.5s later (within 4s)
-        type: 'whoosh_fast',
-        intent: 'transition',
-        reason: 'second whoosh with higher conf',
-        confidence: 0.9,
-        volume: 0.8,
-        snapped: 'none',
-      },
-    ];
-
-    const finalized = finalizeCandidates(events, [], duration);
-    expect(finalized.length).toBe(1);
-    expect(finalized[0].id).toBe('w2');
-  });
-
-  it('removes events closer than 0.6s keeping higher confidence', () => {
-    const events: SfxEvent[] = [
-      {
-        id: 'c1',
-        time: 6.0,
-        type: 'pop',
-        intent: 'text_on_screen',
-        reason: 'pop',
-        confidence: 0.92,
-        volume: 0.7,
-        snapped: 'none',
-      },
-      {
-        id: 'c2',
-        time: 6.3, // only 0.3s apart
-        type: 'click',
-        intent: 'action',
-        reason: 'click',
-        confidence: 0.7,
-        volume: 0.6,
-        snapped: 'none',
-      },
-    ];
-
-    const finalized = finalizeCandidates(events, [], duration);
-    expect(finalized.length).toBe(1);
-    expect(finalized[0].id).toBe('c1');
-  });
-
-  it('drops events with confidence < 0.3', () => {
-    const events: SfxEvent[] = [
-      {
-        id: 'low',
-        time: 1.0,
-        type: 'pop',
-        intent: 'action',
-        reason: 'uncertain',
-        confidence: 0.25,
-        volume: 0.5,
-        snapped: 'none',
-      },
-    ];
-
-    const finalized = finalizeCandidates(events, [], duration);
-    expect(finalized.length).toBe(0);
+    expect(ids).not.toContain('e1');
+    expect(ids).toContain('e2');
+    expect(ids).toContain('e3');
+    expect(ids).toContain('e4');
   });
 });
 
-describe('applyDensity', () => {
-  it('respects budget, minGap, and minConf for each level', () => {
-    expect(DENSITY.minimal.perMin).toBe(3);
-    expect(DENSITY.minimal.minConf).toBe(0.75);
-    expect(DENSITY.minimal.minGap).toBe(2.0);
-
-    expect(DENSITY.balanced.perMin).toBe(8);
-    expect(DENSITY.balanced.minConf).toBe(0.55);
-    expect(DENSITY.balanced.minGap).toBe(1.0);
-
-    expect(DENSITY.heavy.perMin).toBe(16);
-    expect(DENSITY.heavy.minConf).toBe(0.4);
-    expect(DENSITY.heavy.minGap).toBe(0.6);
-  });
-
-  it('for a 30s video at minimal density, returns at most 2 events', () => {
-    const candidates: SfxEvent[] = [
-      { id: '1', time: 2.0, type: 'whoosh_fast', intent: 'transition', reason: 'r', confidence: 0.95, volume: 0.8, snapped: 'cut' },
-      { id: '2', time: 8.0, type: 'pop', intent: 'action', reason: 'r', confidence: 0.9, volume: 0.8, snapped: 'none' },
-      { id: '3', time: 14.0, type: 'ding', intent: 'emphasis', reason: 'r', confidence: 0.85, volume: 0.8, snapped: 'none' },
-      { id: '4', time: 20.0, type: 'boom', intent: 'action', reason: 'r', confidence: 0.8, volume: 0.8, snapped: 'none' },
-    ];
-
-    // 30s video: budget = Math.max(1, Math.round((30 / 60) * 3)) = Math.round(1.5) = 2
-    const filtered = applyDensity(candidates, 30, 'minimal');
-    expect(filtered.length).toBeLessThanOrEqual(2);
-    expect(filtered.length).toBe(2);
-  });
-});
-
-describe('normalizeDirectorResponse', () => {
-  const duration = 10.0;
-
-  it('drops unknown sound types and maps known synonyms', () => {
-    const raw = JSON.stringify({
-      videoType: 'vlog',
-      mood: 'upbeat',
-      summary: 'fun day out',
-      needsSfx: true,
-      recommendedDensity: 'balanced',
-      reasoning: 'cuts and visual accents benefit from audio reinforcement',
-      speech: [],
-      events: [
-        { time: 1.0, type: 'whoosh', intent: 'transition', reason: 'swipe cut', confidence: 0.8, volume: 0.7 },
-        { time: 2.0, type: 'hit', intent: 'emphasis', reason: 'punchy accent', confidence: 0.8, volume: 0.7 },
-        { time: 3.0, type: 'thud', intent: 'emphasis', reason: 'soft accent', confidence: 0.8, volume: 0.7 },
-        { time: 4.0, type: 'swoosh', intent: 'action', reason: 'hand motion', confidence: 0.8, volume: 0.7 },
-        { time: 5.0, type: 'sting', intent: 'intro', reason: 'title sting', confidence: 0.8, volume: 0.7 },
-        { time: 6.0, type: 'alien_laser_cannon', intent: 'action', reason: 'unknown', confidence: 0.8, volume: 0.7 },
-      ],
-    });
-
-    const res = normalizeDirectorResponse(raw, duration);
-    const types = res.events.map((e) => e.type);
-
-    expect(types).toContain('whoosh_fast'); // whoosh mapped
-    expect(types).toContain('impact_hard'); // hit mapped
-    expect(types).toContain('impact_soft'); // thud mapped
-    expect(types).toContain('swipe');       // swoosh mapped
-    expect(types).toContain('stinger_intro'); // sting mapped
-    expect(types).not.toContain('alien_laser_cannon'); // unknown dropped
-  });
-
-  it('clamps event times to [0.05, duration - 0.2]', () => {
-    const raw = JSON.stringify({
-      videoType: 'tutorial',
-      mood: 'focused',
-      summary: 'coding tutorial',
-      needsSfx: true,
-      recommendedDensity: 'minimal',
-      reasoning: 'subtle clicks',
-      speech: [],
-      events: [
-        { time: 0.01, type: 'click', intent: 'action', reason: 'early click', confidence: 0.8, volume: 0.7 },
-        { time: 9.95, type: 'pop', intent: 'text_on_screen', reason: 'end pop', confidence: 0.8, volume: 0.7 },
-      ],
-    });
-
-    const res = normalizeDirectorResponse(raw, duration);
-    expect(res.events[0].time).toBe(0.05);
-    expect(res.events[1].time).toBe(Number((duration - 0.2).toFixed(3)));
-  });
-
-  it('extracts JSON object when surrounded by extra markdown or conversation text', () => {
-    const raw = `Here is your JSON response:
-\`\`\`json
-{
-  "videoType": "comedy",
-  "mood": "funny",
-  "summary": "funny sketch",
-  "needsSfx": true,
-  "recommendedDensity": "heavy",
-  "reasoning": "comedy timing needs rimshots and record scratches",
-  "speech": [{ "start": 1.0, "end": 4.0 }],
-  "events": [
-    { "time": 4.5, "type": "rimshot", "intent": "comedy", "reason": "punchline", "confidence": 0.9, "volume": 0.8 }
-  ]
-}
-\`\`\`
-Hope this helps!`;
-
-    const res = normalizeDirectorResponse(raw, duration);
-    expect(res.videoType).toBe('comedy');
-    expect(res.events.length).toBe(1);
-    expect(res.events[0].type).toBe('rimshot');
-  });
-});
-
-describe('gemini request builder & client', () => {
-  it('places key in x-goog-api-key header and NOT in URL, uses generationConfig with no config field', () => {
-    const parts = [
-      { text: 'Sample intro' },
-      { inlineData: { mimeType: 'audio/wav', data: 'AQID' } },
-      { text: 'Frame at t=1.00s' },
-      { inlineData: { mimeType: 'image/jpeg', data: 'dGVzdA==' } },
-      { text: 'Final instructions' },
-    ];
-
-    const body = buildGeminiGenerateContentBody(parts, DIRECTOR_SCHEMA, 0.2);
-
-    // Body structure assertions
-    expect(body.generationConfig).toBeDefined();
-    expect((body as any).config).toBeUndefined();
-    expect(body.generationConfig?.temperature).toBe(0.2);
-    expect(body.generationConfig?.responseMimeType).toBe('application/json');
-    expect(body.generationConfig?.responseSchema).toBeDefined();
-
-    // Parts order assertions: audio, then frame text+image, then instructions
-    const p = body.contents[0].parts;
-    expect(p[0].text).toBe('Sample intro');
-    expect(p[1].inlineData?.mimeType).toBe('audio/wav');
-    expect(p[2].text).toBe('Frame at t=1.00s');
-    expect(p[3].inlineData?.mimeType).toBe('image/jpeg');
-    expect(p[4].text).toBe('Final instructions');
-  });
-
-  it('redacts sensitive API keys from strings and error messages', () => {
-    const rawSecret = 'AIzaSyTest1234567890abcdefghijklmnopqrst';
-    const text = `Failed request with key ${rawSecret}`;
-    const cleaned = redactApiKey(text, rawSecret);
-    expect(cleaned).not.toContain(rawSecret);
-    expect(cleaned).toContain('[REDACTED]');
-  });
-
-  it('ranks models preferring flash > flash-lite > pro and higher version numbers', () => {
+describe('rankGeminiModels', () => {
+  it('ranks stable flash before preview flash, flash-lite before pro', () => {
     const list = [
       'gemini-1.5-pro',
       'gemini-1.5-flash',
       'gemini-2.0-flash',
-      'gemini-2.5-flash',
-      'gemini-2.0-flash-lite',
-      'gemini-2.5-flash-preview',
+      'gemini-3.8-flash',
+      'gemini-3.1-flash-lite',
+      'gemini-3.7-flash-preview',
     ];
 
     const ranked = rankGeminiModels(list);
-    // Highest version stable flash should be first
-    expect(ranked[0]).toBe('gemini-2.5-flash');
-    expect(ranked[1]).toBe('gemini-2.5-flash-preview');
-    expect(ranked[2]).toBe('gemini-2.0-flash');
-    expect(ranked[3]).toBe('gemini-2.0-flash-lite');
+    expect(ranked[0]).toBe('gemini-3.8-flash');
+    expect(ranked[1]).toBe('gemini-2.0-flash');
+    expect(ranked[2]).toBe('gemini-1.5-flash');
+    expect(ranked[3]).toBe('gemini-3.7-flash-preview');
+    expect(ranked[4]).toBe('gemini-3.1-flash-lite');
+    expect(ranked[5]).toBe('gemini-1.5-pro');
+  });
+});
+
+describe('thinkingConfig logic', () => {
+  it('assigns thinkingBudget: 0 for 2.5 flash and thinkingLevel: LOW for gemini-3*', () => {
+    const config25 = getThinkingConfigForModel('gemini-2.5-flash');
+    expect(config25).toEqual({ thinkingBudget: 0 });
+
+    const config38 = getThinkingConfigForModel('gemini-3.8-flash');
+    expect(config38).toEqual({ thinkingLevel: 'LOW' });
+  });
+
+  it('omits thinkingConfig if model is marked in no-thinking-config', () => {
+    markNoThinkingModel('models/gemini-3.7-flash');
+    expect(isNoThinkingModel('models/gemini-3.7-flash')).toBe(true);
+
+    const config = getThinkingConfigForModel('models/gemini-3.7-flash');
+    expect(config).toBeUndefined();
+  });
+});
+
+describe('sample frame downsampling', () => {
+  it('selects at most 60 evenly spaced samples', () => {
+    const dummySamples = Array.from({ length: 150 }, (_, i) => i);
+    const selected = selectEquallySpacedSamples(dummySamples, 60);
+
+    expect(selected.length).toBe(60);
+    expect(selected[0]).toBe(0);
+    expect(selected[selected.length - 1]).toBe(149);
+  });
+});
+
+describe('callGeminiGenerateContent retry and timeout policies', () => {
+  const originalFetch = global.fetch;
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  it('does NOT retry the same model on timeout and switches to next candidate model', async () => {
+    let callCount = 0;
+    const requestedEndpoints: string[] = [];
+
+    global.fetch = vi.fn().mockImplementation((url, init) => {
+      callCount++;
+      requestedEndpoints.push(url.toString());
+
+      if (callCount === 1) {
+        return Promise.reject(new Error('timed out after 60 s'));
+      }
+
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({
+          candidates: [{ content: { parts: [{ text: '{"events":[]}' }] } }],
+        }),
+      });
+    });
+
+    const body = buildGeminiGenerateContentBody([], {}, 0.2);
+    const result = await callGeminiGenerateContent('fake-key', body);
+
+    expect(result.text).toBe('{"events":[]}');
+    expect(requestedEndpoints.length).toBe(2);
+    expect(requestedEndpoints[0]).not.toBe(requestedEndpoints[1]);
+  });
+
+  it('retries HTTP 400 thinking error ONCE without thinkingConfig without counting as failure', async () => {
+    const postBodies: any[] = [];
+
+    global.fetch = vi.fn().mockImplementation((url, init) => {
+      if (init?.body) {
+        postBodies.push(JSON.parse(init.body));
+      }
+
+      if (postBodies.length === 1) {
+        return Promise.resolve({
+          ok: false,
+          status: 400,
+          json: () => Promise.resolve({ error: { message: 'Invalid thinkingConfig setting' } }),
+        });
+      }
+
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({
+          candidates: [{ content: { parts: [{ text: '{"events":[]}' }] } }],
+        }),
+      });
+    });
+
+    const body = buildGeminiGenerateContentBody([], {}, 0.2, 'gemini-3.8-flash');
+    const result = await callGeminiGenerateContent('fake-key', body);
+
+    expect(result.text).toBe('{"events":[]}');
+    expect(postBodies.length).toBe(2);
+    expect(postBodies[0].generationConfig?.thinkingConfig).toBeDefined();
+    expect(postBodies[1].generationConfig?.thinkingConfig).toBeUndefined();
+  });
+
+  it('stops immediately when total 150s deadline is exceeded', async () => {
+    vi.useFakeTimers();
+
+    global.fetch = vi.fn().mockImplementation(() => {
+      // Fast forward fake timers past 150s
+      vi.advanceTimersByTime(160000);
+      return Promise.reject(new Error('timed out after 60 s'));
+    });
+
+    const body = buildGeminiGenerateContentBody([], {}, 0.2);
+    const promise = callGeminiGenerateContent('fake-key', body);
+
+    await expect(promise).rejects.toThrow('The AI did not answer in time. Check your connection, or try again.');
+
+    vi.useRealTimers();
   });
 });

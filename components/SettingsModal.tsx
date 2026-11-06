@@ -17,12 +17,14 @@ import {
   RefreshCw,
   Activity,
   Music,
+  Zap,
 } from 'lucide-react';
 import {
   discoverGeminiModels,
   getSelectedModel,
   setSelectedModel,
   getAiCallsToday,
+  testAiSpeed,
 } from '@/ai/gemini';
 import { SfxTestScreen } from '@/components/SfxTestScreen';
 
@@ -64,6 +66,11 @@ export function SettingsModal() {
   const [isRefreshingModels, setIsRefreshingModels] = useState(false);
   const [aiCallsToday, setAiCallsToday] = useState<number>(() => getAiCallsToday());
   const [storageUsage, setStorageUsage] = useState<{ used: number; quota: number } | null>(null);
+
+  // Speed test state
+  const [isTestingSpeed, setIsTestingSpeed] = useState(false);
+  const [speedTestResult, setSpeedTestResult] = useState<{ latencyMs: number; modelUsed: string } | null>(null);
+  const [speedTestError, setSpeedTestError] = useState<string | null>(null);
 
   useEffect(() => {
     if (typeof navigator !== 'undefined' && navigator.storage && navigator.storage.estimate) {
@@ -130,6 +137,27 @@ export function SettingsModal() {
       showToast(`Failed to discover models: ${(err as Error).message}`, 'error');
     } finally {
       setIsRefreshingModels(false);
+    }
+  };
+
+  const handleTestSpeed = async () => {
+    if (!apiKey.trim()) {
+      showToast('Enter your API key first to test AI speed.', 'error');
+      return;
+    }
+    setIsTestingSpeed(true);
+    setSpeedTestResult(null);
+    setSpeedTestError(null);
+    try {
+      const res = await testAiSpeed(apiKey, currentModel);
+      setSpeedTestResult(res);
+      showToast(`Speed test passed: ${res.latencyMs} ms (${res.modelUsed})`);
+    } catch (err) {
+      const msg = (err as Error).message || 'Speed test failed';
+      setSpeedTestError(msg);
+      showToast(msg, 'error');
+    } finally {
+      setIsTestingSpeed(false);
     }
   };
 
@@ -272,10 +300,21 @@ export function SettingsModal() {
               </button>
             </div>
 
-            <div className="space-y-1.5">
-              <label htmlFor="model-select" className="text-xs text-[var(--text-2)] block">
-                Selected model (Auto chooses highest ranked Flash model)
-              </label>
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <label htmlFor="model-select" className="text-xs text-[var(--text-2)] block">
+                  Selected model (Auto chooses highest ranked Flash model)
+                </label>
+                <button
+                  type="button"
+                  onClick={handleTestSpeed}
+                  disabled={isTestingSpeed || !apiKey.trim()}
+                  className="px-2.5 py-1 rounded-[6px] bg-[var(--ink)] border border-[var(--ink-3)] text-xs text-[var(--volt)] font-mono hover:border-[var(--volt)] transition-colors inline-flex items-center gap-1.5 disabled:opacity-40 min-h-[32px]"
+                >
+                  <Zap className={`w-3.5 h-3.5 ${isTestingSpeed ? 'animate-pulse' : ''}`} />
+                  <span>{isTestingSpeed ? 'Testing speed...' : 'Test AI speed'}</span>
+                </button>
+              </div>
               <select
                 id="model-select"
                 value={currentModel}
@@ -292,6 +331,26 @@ export function SettingsModal() {
                   );
                 })}
               </select>
+
+              {/* Speed Test Results Display */}
+              {speedTestResult && (
+                <div className="p-2.5 rounded-[8px] bg-[var(--ink)] border border-[var(--volt)]/50 text-xs font-mono text-[var(--volt)] flex items-center justify-between animate-in fade-in-0">
+                  <span className="flex items-center gap-1.5">
+                    <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                    <span>Speed Test: {speedTestResult.latencyMs} ms</span>
+                  </span>
+                  <span className="text-[var(--text-2)] text-[11px] truncate max-w-[180px]">
+                    {speedTestResult.modelUsed.replace(/^models\//, '')}
+                  </span>
+                </div>
+              )}
+
+              {speedTestError && (
+                <div className="p-2.5 rounded-[8px] bg-[var(--ink)] border border-[var(--danger)]/50 text-xs font-mono text-[var(--danger)] flex items-center gap-1.5 animate-in fade-in-0">
+                  <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                  <span className="truncate">{speedTestError}</span>
+                </div>
+              )}
             </div>
 
             {/* AI Calls Today Counter */}
