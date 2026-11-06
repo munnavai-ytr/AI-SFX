@@ -28,6 +28,8 @@ import { SfxTestScreen } from '@/components/SfxTestScreen';
 
 import { useShallow } from 'zustand/react/shallow';
 
+import { formatBytes } from '@/lib/format';
+
 export function SettingsModal() {
   const {
     isSettingsOpen,
@@ -61,6 +63,18 @@ export function SettingsModal() {
   const [currentModel, setCurrentModel] = useState<string>(() => getSelectedModel());
   const [isRefreshingModels, setIsRefreshingModels] = useState(false);
   const [aiCallsToday, setAiCallsToday] = useState<number>(() => getAiCallsToday());
+  const [storageUsage, setStorageUsage] = useState<{ used: number; quota: number } | null>(null);
+
+  useEffect(() => {
+    if (typeof navigator !== 'undefined' && navigator.storage && navigator.storage.estimate) {
+      navigator.storage.estimate().then((est) => {
+        setStorageUsage({
+          used: est.usage || 0,
+          quota: est.quota || 0,
+        });
+      });
+    }
+  }, [isSettingsOpen]);
 
   useEffect(() => {
     if (apiKey.trim()) {
@@ -304,49 +318,74 @@ export function SettingsModal() {
             </div>
           </div>
 
-          {/* Data Storage Section */}
-          <div className="border-t border-[var(--ink-3)] pt-6">
-            <h3 className="text-sm font-semibold text-[var(--text)] mb-1">Data Storage</h3>
-            <p className="text-xs text-[var(--text-2)] mb-4 leading-relaxed">
-              Video files, analysis data, and SFX plans are stored exclusively inside your browser&apos;s IndexedDB. No videos or keys are uploaded to any server.
-            </p>
+            {/* Honest Privacy Notice */}
+            <div className="p-3 rounded-[10px] bg-[var(--ink)] border border-[var(--volt)]/40 text-xs text-[var(--text-2)] space-y-1">
+              <span className="text-[var(--volt)] font-bold block">Privacy &amp; Data Guarantee</span>
+              <p className="leading-normal text-[11px]">
+                Your video stays on your device. For analysis only, small preview frames and a low-quality audio copy are sent to Google Gemini using your API key.
+              </p>
+            </div>
 
-            {showClearConfirm ? (
-              <div className="bg-[var(--ink)] border border-[var(--danger)]/40 rounded-[12px] p-4 space-y-3">
-                <p className="text-xs text-[var(--text)] font-medium">
-                  Are you sure? This will permanently delete all projects and saved video files from your browser.
-                </p>
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={handleClearAll}
-                    disabled={isClearing}
-                    className="px-4 py-2 rounded-[8px] bg-[var(--danger)] text-white text-xs font-semibold hover:opacity-90 disabled:opacity-50 transition-opacity min-h-[44px] flex items-center justify-center gap-1.5"
-                  >
-                    {isClearing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
-                    Yes, delete everything
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setShowClearConfirm(false)}
-                    disabled={isClearing}
-                    className="px-4 py-2 rounded-[8px] bg-[var(--ink-3)] text-[var(--text)] text-xs font-medium hover:bg-[var(--ink-3)]/80 transition-colors min-h-[44px]"
-                  >
-                    Cancel
-                  </button>
+            {/* Data Storage Section & About Info */}
+            <div className="border-t border-[var(--ink-3)] pt-6 space-y-4">
+              <h3 className="text-sm font-semibold text-[var(--text)]">About &amp; Storage</h3>
+              <div className="p-3 rounded-[10px] bg-[var(--ink)] border border-[var(--ink-3)] space-y-2 text-xs font-mono text-[var(--text-2)]">
+                <div className="flex justify-between">
+                  <span>Version</span>
+                  <span className="text-[var(--text)]">0.1.0</span>
+                </div>
+                <div className="flex justify-between">
+                  <span>Build Date</span>
+                  <span className="text-[var(--text)]">2026-11-06</span>
+                </div>
+                <div className="flex justify-between">
+                  <span>AI Calls Today</span>
+                  <span className="text-[var(--volt)]">{aiCallsToday}</span>
+                </div>
+                <div className="flex justify-between border-t border-[var(--ink-3)] pt-2">
+                  <span>Storage Usage</span>
+                  <span className="text-[var(--text)]">
+                    {storageUsage ? `${formatBytes(storageUsage.used)} / ${formatBytes(storageUsage.quota)}` : 'Calculating...'}
+                  </span>
                 </div>
               </div>
-            ) : (
-              <button
-                type="button"
-                onClick={() => setShowClearConfirm(true)}
-                className="w-full sm:w-auto px-4 py-2.5 rounded-[10px] border border-[var(--danger)]/30 text-[var(--danger)] text-xs font-semibold hover:bg-[var(--danger)]/10 transition-colors inline-flex items-center justify-center gap-2 min-h-[44px]"
-              >
-                <Trash2 className="w-4 h-4" />
-                Clear all data
-              </button>
-            )}
-          </div>
+
+              {showClearConfirm ? (
+                <div className="bg-[var(--ink)] border border-[var(--danger)]/40 rounded-[12px] p-4 space-y-3">
+                  <p className="text-xs text-[var(--text)] font-medium">
+                    Are you sure? This will permanently delete all projects and saved video files from your browser.
+                  </p>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleClearAll}
+                      disabled={isClearing}
+                      className="px-4 py-2 rounded-[8px] bg-[var(--danger)] text-white text-xs font-semibold hover:opacity-90 disabled:opacity-50 transition-opacity min-h-[44px] flex items-center justify-center gap-1.5"
+                    >
+                      {isClearing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
+                      Yes, delete everything
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setShowClearConfirm(false)}
+                      disabled={isClearing}
+                      className="px-4 py-2 rounded-[8px] bg-[var(--ink-3)] text-[var(--text)] text-xs font-medium hover:bg-[var(--ink-3)]/80 transition-colors min-h-[44px]"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setShowClearConfirm(true)}
+                  className="w-full sm:w-auto px-4 py-2.5 rounded-[10px] border border-[var(--danger)]/30 text-[var(--danger)] text-xs font-semibold hover:bg-[var(--danger)]/10 transition-colors inline-flex items-center justify-center gap-2 min-h-[44px]"
+                >
+                  <Trash2 className="w-4 h-4" />
+                  Clear all data
+                </button>
+              )}
+            </div>
         </div>
 
         {/* Footer */}

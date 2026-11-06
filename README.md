@@ -1,55 +1,33 @@
-# SFX AI (Step 2: Real Analysis Engine)
+# SFX AI
 
-AI-assisted sound effects workflow for video creators.
-Step 2 implements the real browser-only analysis engine without mock data or external API calls.
+Professional AI sound design app for video content. Upload a video, run AI analysis to auto-detect cuts and sound moments, refine sound effects in the Studio timeline, and export mixed videos with fast, zero-re-encode stream copying.
 
-## Prerequisites & Installation
+## Features
+- **Video Upload**: Native file picker on Android, browser input on web with client-side probe.
+- **Measurable Signal Analysis**: Scene cut detection, audio envelope, transient peaks, speech detection.
+- **AI Sound Director**: Powered by Gemini flash models to map scene beats to 30 deterministic DSP sound effect types.
+- **Studio Sound Mixer**: Live audio preview scheduler, timeline drag/snap, variant switching, master volume & sync offset.
+- **Fast Video Export**: Lossless video stream copying (`-c:v copy`) + 44.1 kHz AAC audio muxing via `@ffmpeg/ffmpeg`.
+- **WAV Fallbacks**: Export SFX audio only or mixed audio directly to WAV files.
+- **Privacy First**: All video processing runs locally in your browser/device. Only minimal 1 fps frames and low-quality audio are sent to Gemini for analysis.
 
-Install dependencies:
+## How to Get the Android APK
+1. Push your changes to the `main` branch on GitHub.
+2. Go to the **Actions** tab in your GitHub repository.
+3. Select the **Build Android APK** workflow.
+4. Download the `sfx-ai-debug-apk` artifact containing `app-debug.apk`.
 
+## Local Development & Testing
 ```bash
+# Install dependencies
 npm install
-```
 
-## Development
-
-Start local development server:
-
-```bash
+# Prebuild copies FFmpeg assets to public/ffmpeg/
 npm run dev
-```
 
-App runs at `http://localhost:3000`.
-
-## Testing
-
-Run unit test suite with Vitest:
-
-```bash
+# Run unit test suite
 npm test
-```
 
-Verifies:
-- `detectCuts`: pure signal scene boundary detection from frame difference arrays
-- `detectTransients`: audio rise/hit detection above dB threshold
-- `detectQuietGaps`: quiet window detection below noise floor
-- `encodeWav16k`: RIFF/WAVE header fields and 16-bit PCM WAV byte structure
-
-## Production Build
-
-Build the static export (`output: 'export'`):
-
-```bash
+# Build static production export
 npm run build
 ```
-
-The compiled static export bundle is emitted into `out/` ready for Capacitor or static hosting.
-
-## Analysis Pipeline (Step 2 Engine)
-
-1. **`read`**: Loads stored video Blob from IndexedDB, creates temporary object URL, primes offscreen `<video>` (`readyState >= 2`).
-2. **`audio`**: Decodes audio track with `AudioContext`, downmixes to mono Float32, resamples to 16 kHz using `OfflineAudioContext`, encodes 16-bit PCM WAV Blob. Gracefully skips if file lacks audio.
-3. **`frames`**: Realtime capture at 2x playbackRate using `requestVideoFrameCallback` (or sequential seek fallback). Compares 32x18 grayscale diffs and captures 384px JPEG frames at 1 fps. Estimates FPS from median frame spacing.
-4. **`cuts`**: Computes scene transitions using adaptive window median difference scoring.
-5. **`sound`**: Computes 50 Hz loudness envelope in dBFS, detects transient hits and quiet pauses.
-6. **`pack`**: Packages bundle, enforces 18 MB inline payload budget (optimizing JPEG dimensions and frame rate if necessary), saves `AnalysisBundle` to IndexedDB.

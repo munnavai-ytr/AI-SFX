@@ -1,9 +1,48 @@
 /**
  * Platform video picker abstraction.
+ * On Native Android (Capacitor), uses @capawesome/capacitor-file-picker FilePicker.pickVideos().
  * On Web, uses a hidden <input type="file" accept="video/*">.
- * Native Android picker can be swapped in here in future steps.
  */
+import { Capacitor } from '@capacitor/core';
+import { FilePicker } from '@capawesome/capacitor-file-picker';
+
 export async function pickVideo(): Promise<File | null> {
+  const isNative = typeof window !== 'undefined' && Capacitor.isNativePlatform();
+
+  if (isNative) {
+    try {
+      const result = await FilePicker.pickVideos({
+        limit: 1,
+        readData: false,
+      });
+
+      if (!result.files || result.files.length === 0) {
+        return null;
+      }
+
+      const picked = result.files[0];
+      const fileName = picked.name || 'imported-video.mp4';
+      const mimeType = picked.mimeType || 'video/mp4';
+
+      if (picked.blob) {
+        return new File([picked.blob], fileName, { type: mimeType });
+      }
+
+      if (picked.path) {
+        const webUrl = Capacitor.convertFileSrc(picked.path);
+        const res = await fetch(webUrl);
+        const blob = await res.blob();
+        return new File([blob], fileName, { type: mimeType });
+      }
+
+      return null;
+    } catch (err) {
+      console.error('Native FilePicker error:', err);
+      return null;
+    }
+  }
+
+  // Web File Input Fallback
   return new Promise((resolve) => {
     if (typeof document === 'undefined') {
       resolve(null);
@@ -36,7 +75,6 @@ export async function pickVideo(): Promise<File | null> {
       resolve(file);
     };
 
-    // Fallback if user cancels file dialog on some browsers
     const onFocusCheck = () => {
       setTimeout(() => {
         if (!resolved) {

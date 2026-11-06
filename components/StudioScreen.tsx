@@ -40,6 +40,7 @@ import {
   getSharedAudioContext,
 } from '@/audio/preview';
 import { SfxTestScreen } from '@/components/SfxTestScreen';
+import { ExportModal } from '@/components/ExportModal';
 import {
   ArrowLeft,
   Settings,
@@ -70,6 +71,8 @@ import {
   Music,
   Check,
   ChevronDown,
+  Download,
+  WifiOff,
 } from 'lucide-react';
 
 function formatEventTime(sec: number): string {
@@ -104,6 +107,7 @@ export function StudioScreen() {
 
   const { showToast } = useToast();
   const [videoObjectUrl, setVideoObjectUrl] = useState<string | null>(null);
+  const [rawVideoBlob, setRawVideoBlob] = useState<Blob | null>(null);
   const [loadedProjectId, setLoadedProjectId] = useState<string | null>(null);
   const [bundle, setBundle] = useState<AnalysisBundle | null>(null);
   const [plan, setPlan] = useState<SfxPlan | null>(null);
@@ -111,6 +115,7 @@ export function StudioScreen() {
   const [densityChoice, setDensityChoice] = useState<'auto' | DensityLevel>('auto');
   const [showSuggestionsAnyway, setShowSuggestionsAnyway] = useState(false);
   const [showSoundTest, setShowSoundTest] = useState(false);
+  const [showExportModal, setShowExportModal] = useState(false);
 
   // Audio & Scheduler State
   const [isPlaying, setIsPlaying] = useState(false);
@@ -133,6 +138,22 @@ export function StudioScreen() {
   // Add SFX picker state
   const [showAddPicker, setShowAddPicker] = useState(false);
   const [addType, setAddType] = useState<SfxType>('whoosh_fast');
+
+  const [isOnline, setIsOnline] = useState<boolean>(() =>
+    typeof navigator !== 'undefined' ? navigator.onLine : true
+  );
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const onOnline = () => setIsOnline(true);
+    const onOffline = () => setIsOnline(false);
+    window.addEventListener('online', onOnline);
+    window.addEventListener('offline', onOffline);
+    return () => {
+      window.removeEventListener('online', onOnline);
+      window.removeEventListener('offline', onOffline);
+    };
+  }, []);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const activeUrlRef = useRef<string | null>(null);
@@ -270,6 +291,7 @@ export function StudioScreen() {
     getVideoBlob(activeProjectId)
       .then((blob) => {
         if (isCancelled) return;
+        setRawVideoBlob(blob);
         if (activeUrlRef.current) {
           URL.revokeObjectURL(activeUrlRef.current);
           activeUrlRef.current = null;
@@ -287,6 +309,7 @@ export function StudioScreen() {
       .catch((err) => {
         console.error('Failed to load video blob:', err);
         if (!isCancelled) {
+          setRawVideoBlob(null);
           setVideoObjectUrl(null);
           setLoadedProjectId(activeProjectId);
         }
@@ -539,7 +562,9 @@ export function StudioScreen() {
   const isKeyTestedAndValid = keyTestState.tested && keyTestState.valid;
 
   let disabledReason: string | null = null;
-  if (project.status === 'saving') {
+  if (!isOnline) {
+    disabledReason = "You're offline. AI analysis needs internet; editing and export still work.";
+  } else if (project.status === 'saving') {
     disabledReason = 'Saving video...';
   } else if (project.status === 'probing') {
     disabledReason = 'Reading video info...';
@@ -551,7 +576,7 @@ export function StudioScreen() {
     disabledReason = 'Test your Gemini API key in Settings';
   }
 
-  const isAnalyzeEnabled = isVideoReady && hasKey && isKeyTestedAndValid && !isAnalyzing;
+  const isAnalyzeEnabled = isVideoReady && hasKey && isKeyTestedAndValid && !isAnalyzing && isOnline;
 
   // Run the full analysis pipeline
   const handleAnalyzeClick = async (force = false) => {
@@ -649,6 +674,17 @@ export function StudioScreen() {
             </button>
             <button
               type="button"
+              onClick={() => setShowExportModal(true)}
+              disabled={!bundle || events.length === 0}
+              aria-label="Export video"
+              title="Export video with SFX"
+              className="px-3.5 py-2 rounded-[10px] bg-[var(--volt)] text-[var(--volt-ink)] font-bold text-xs hover:opacity-95 transition-opacity inline-flex items-center gap-1.5 min-h-[44px] disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              <Download className="w-4 h-4" />
+              <span>Export</span>
+            </button>
+            <button
+              type="button"
               onClick={openSettings}
               aria-label="Open settings"
               className="w-11 h-11 flex items-center justify-center rounded-[10px] text-[var(--text-2)] hover:text-[var(--text)] hover:bg-[var(--ink-2)] border border-transparent hover:border-[var(--ink-3)] transition-colors min-h-[44px] min-w-[44px]"
@@ -661,6 +697,14 @@ export function StudioScreen() {
 
       {/* Main Studio Area */}
       <main className="flex-1 max-w-6xl w-full mx-auto p-4 sm:p-6 lg:p-8 safe-padding-bottom space-y-6">
+        {/* Offline Banner */}
+        {!isOnline && (
+          <div className="p-3.5 rounded-[12px] bg-[var(--ink-2)] border border-[var(--danger)]/50 text-xs text-[var(--danger)] flex items-center gap-2.5 font-mono">
+            <WifiOff className="w-4 h-4 shrink-0" />
+            <span>You&apos;re offline. AI analysis needs internet; editing and export still work.</span>
+          </div>
+        )}
+
         {/* Preparing Sounds Overlay / Toast Banner */}
         {preparingCount && (
           <div className="p-3 rounded-[10px] bg-[var(--ink-2)] border border-[var(--volt)] text-xs text-[var(--volt)] flex items-center justify-between glow-volt-border animate-pulse">
@@ -1176,6 +1220,18 @@ export function StudioScreen() {
           </div>
         </div>
       </main>
+
+      {showExportModal && (
+        <ExportModal
+          videoBlob={rawVideoBlob}
+          videoFileName={project.name}
+          bundle={bundle}
+          events={events}
+          plan={plan}
+          masterVol={masterVol}
+          onClose={() => setShowExportModal(false)}
+        />
+      )}
     </div>
   );
 }
