@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useEffect, useState, useRef, useMemo, useCallback } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { useAppStore } from '@/stores/use-app-store';
 import { getVideoBlob, getAnalysisBundle, deleteAnalysisBundle } from '@/lib/storage';
 import { formatDuration, formatBytes } from '@/lib/format';
@@ -89,7 +90,17 @@ export function StudioScreen() {
     apiKey,
     keyTestState,
     retryProject,
-  } = useAppStore();
+  } = useAppStore(
+    useShallow((s) => ({
+      activeProjectId: s.activeProjectId,
+      projects: s.projects,
+      setScreen: s.setScreen,
+      openSettings: s.openSettings,
+      apiKey: s.apiKey,
+      keyTestState: s.keyTestState,
+      retryProject: s.retryProject,
+    }))
+  );
 
   const { showToast } = useToast();
   const [videoObjectUrl, setVideoObjectUrl] = useState<string | null>(null);
@@ -126,6 +137,7 @@ export function StudioScreen() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const activeUrlRef = useRef<string | null>(null);
   const schedulerRef = useRef<PreviewScheduler | null>(null);
+  const initializedKeyRef = useRef<string>('');
 
   const project = projects.find((p) => p.id === activeProjectId);
   const isLoadingBlob = Boolean(activeProjectId && loadedProjectId !== activeProjectId);
@@ -184,34 +196,38 @@ export function StudioScreen() {
       .catch((err) => console.error('Failed to load SFX plan:', err));
 
     // Load SFX edit state or initialize from plan
-    getSfxEditState(activeProjectId)
-      .then((storedState) => {
-        if (isCancelled) return;
-        if (storedState && Array.isArray(storedState.events)) {
-          setEvents(storedState.events);
-          setDensityChoice(storedState.density || 'auto');
-          setHasManualEdits(Boolean(storedState.hasManualEdits));
-          setHistory([storedState.events]);
-          setHistoryIdx(0);
-        } else {
-          // Initialize working list from plan if available
-          getSfxPlan(activeProjectId).then((planData) => {
-            if (isCancelled || !planData) return;
-            const level: DensityLevel = planData.recommendedDensity || 'balanced';
-            const candidates = applyDensity(planData.candidates, planData.summary ? 30 : 60, level);
-            const initial: SfxEditEvent[] = candidates.map((c) => ({
-              ...c,
-              variant: 0,
-              enabled: true,
-            }));
-            setEvents(initial);
-            setDensityChoice('auto');
-            setHistory([initial]);
+    if (initializedKeyRef.current !== activeProjectId) {
+      getSfxEditState(activeProjectId)
+        .then((storedState) => {
+          if (isCancelled) return;
+          if (storedState && Array.isArray(storedState.events)) {
+            setEvents(storedState.events);
+            setDensityChoice(storedState.density || 'auto');
+            setHasManualEdits(Boolean(storedState.hasManualEdits));
+            setHistory([storedState.events]);
             setHistoryIdx(0);
-          });
-        }
-      })
-      .catch((err) => console.error('Failed to load SFX edit state:', err));
+            initializedKeyRef.current = activeProjectId;
+          } else {
+            // Initialize working list from plan if available
+            getSfxPlan(activeProjectId).then((planData) => {
+              if (isCancelled || !planData) return;
+              const level: DensityLevel = planData.recommendedDensity || 'balanced';
+              const candidates = applyDensity(planData.candidates, planData.summary ? 30 : 60, level);
+              const initial: SfxEditEvent[] = candidates.map((c) => ({
+                ...c,
+                variant: 0,
+                enabled: true,
+              }));
+              setEvents(initial);
+              setDensityChoice('auto');
+              setHistory([initial]);
+              setHistoryIdx(0);
+              initializedKeyRef.current = activeProjectId;
+            });
+          }
+        })
+        .catch((err) => console.error('Failed to load SFX edit state:', err));
+    }
 
     return () => {
       isCancelled = true;
@@ -314,7 +330,7 @@ export function StudioScreen() {
         maxAmp = Math.max(maxAmp, Math.abs(leftBus[i]));
       }
       const peakDb = maxAmp > 0 ? Number((20 * Math.log10(maxAmp)).toFixed(1)) : -120;
-      setMeasuredPeakDb(peakDb);
+      setMeasuredPeakDb((prev) => (prev === peakDb ? prev : peakDb));
     });
 
     return () => {
@@ -343,7 +359,10 @@ export function StudioScreen() {
           plan ? plan.speech : [],
           bundle ? bundle.envelopeDb : null,
           (done, total) => {
-            setPreparingCount(done < total ? { done, total } : null);
+            setPreparingCount((prev) => {
+              if (prev && prev.done === done && prev.total === total) return prev;
+              return done < total ? { done, total } : null;
+            });
           }
         );
       }

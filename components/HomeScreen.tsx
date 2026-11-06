@@ -7,6 +7,8 @@ import { useToast } from '@/components/Toast';
 import { formatDuration, formatDate } from '@/lib/format';
 import { Settings, Plus, Film, Trash2, AlertTriangle, Loader2 } from 'lucide-react';
 
+import { useShallow } from 'zustand/react/shallow';
+
 export function HomeScreen() {
   const {
     projects,
@@ -15,7 +17,16 @@ export function HomeScreen() {
     openProject,
     deleteProject,
     createProjectFromFile,
-  } = useAppStore();
+  } = useAppStore(
+    useShallow((s) => ({
+      projects: s.projects,
+      isLoadingProjects: s.isLoadingProjects,
+      openSettings: s.openSettings,
+      openProject: s.openProject,
+      deleteProject: s.deleteProject,
+      createProjectFromFile: s.createProjectFromFile,
+    }))
+  );
 
   const { showToast } = useToast();
   const [isDragging, setIsDragging] = useState(false);

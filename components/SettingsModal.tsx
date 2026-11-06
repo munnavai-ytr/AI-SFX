@@ -26,6 +26,8 @@ import {
 } from '@/ai/gemini';
 import { SfxTestScreen } from '@/components/SfxTestScreen';
 
+import { useShallow } from 'zustand/react/shallow';
+
 export function SettingsModal() {
   const {
     isSettingsOpen,
@@ -35,7 +37,17 @@ export function SettingsModal() {
     testApiKey,
     keyTestState,
     clearAllData,
-  } = useAppStore();
+  } = useAppStore(
+    useShallow((s) => ({
+      isSettingsOpen: s.isSettingsOpen,
+      closeSettings: s.closeSettings,
+      apiKey: s.apiKey,
+      setApiKey: s.setApiKey,
+      testApiKey: s.testApiKey,
+      keyTestState: s.keyTestState,
+      clearAllData: s.clearAllData,
+    }))
+  );
 
   const { showToast } = useToast();
 

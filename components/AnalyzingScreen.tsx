@@ -1,8 +1,9 @@
 'use client';
 
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { useAnalysisStore, StepStatus } from '@/stores/use-analysis-store';
 import { useAppStore } from '@/stores/use-app-store';
+import { useShallow } from 'zustand/react/shallow';
 import {
   ArrowLeft,
   CheckCircle2,
@@ -38,21 +39,40 @@ function StatusIcon({ status }: { status: StepStatus }) {
   }
 }
 
+/**
+ * Timer hook using useState & useEffect instead of unstable getSnapshot in useSyncExternalStore.
+ */
 function useCurrentTime(active: boolean, intervalMs = 250): number {
-  return React.useSyncExternalStore(
-    (onStoreChange) => {
-      if (!active) return () => {};
-      const timer = setInterval(onStoreChange, intervalMs);
-      return () => clearInterval(timer);
-    },
-    () => Date.now(),
-    () => 0
-  );
+  const [now, setNow] = useState(() => (active ? Date.now() : 0));
+
+  useEffect(() => {
+    if (!active) return;
+    const timer = setInterval(() => {
+      setNow(Date.now());
+    }, intervalMs);
+    return () => clearInterval(timer);
+  }, [active, intervalMs]);
+
+  return active ? now : 0;
 }
 
 export function AnalyzingScreen() {
-  const { steps, running, cancelRequested, requestCancel } = useAnalysisStore();
-  const { activeProjectId, projects, setScreen } = useAppStore();
+  const { steps, running, cancelRequested, requestCancel } = useAnalysisStore(
+    useShallow((s) => ({
+      steps: s.steps,
+      running: s.running,
+      cancelRequested: s.cancelRequested,
+      requestCancel: s.requestCancel,
+    }))
+  );
+
+  const { activeProjectId, projects, setScreen } = useAppStore(
+    useShallow((s) => ({
+      activeProjectId: s.activeProjectId,
+      projects: s.projects,
+      setScreen: s.setScreen,
+    }))
+  );
 
   const currentTime = useCurrentTime(running, 250);
   const project = projects.find((p) => p.id === activeProjectId);
@@ -63,8 +83,8 @@ export function AnalyzingScreen() {
     if (!project) return;
     try {
       const { runAnalysisEngine } = await import('@/analysis/engine');
-      const bundle = await runAnalysisEngine(project, { forceReanalyze: true });
-      if (bundle) {
+      const result = await runAnalysisEngine(project, { forceReanalyze: true });
+      if (result) {
         setScreen('studio');
       }
     } catch (err) {
