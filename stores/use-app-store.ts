@@ -138,43 +138,13 @@ export const useAppStore = create<AppState>((set, get) => ({
     }));
 
     try {
-      // Real request GET https://generativelanguage.googleapis.com/v1beta/models with header x-goog-api-key: <key>
-      const response = await fetch('https://generativelanguage.googleapis.com/v1beta/models', {
-        method: 'GET',
-        headers: {
-          'x-goog-api-key': key,
-        },
-      });
+      const { discoverGeminiModels } = await import('@/ai/gemini');
+      const models = await discoverGeminiModels(key, true);
 
-      if (!response.ok) {
-        let errorDetail = `HTTP ${response.status}: ${response.statusText}`;
-        try {
-          const body = await response.json();
-          if (body?.error?.message) {
-            errorDetail = `HTTP ${response.status} — ${body.error.message}`;
-          }
-        } catch {
-          // ignore parsing error
-        }
-
-        const failedState: KeyTestState = {
-          tested: true,
-          valid: false,
-          testedAt: Date.now(),
-          error: errorDetail,
-          testing: false,
-        };
-        set({ keyTestState: failedState });
-        saveKeyTestToStorage(failedState);
-        return;
-      }
-
-      const data = await response.json();
-      const modelCount = Array.isArray(data?.models) ? data.models.length : 0;
       const successState: KeyTestState = {
         tested: true,
         valid: true,
-        modelCount,
+        modelCount: models.length,
         testedAt: Date.now(),
         testing: false,
       };

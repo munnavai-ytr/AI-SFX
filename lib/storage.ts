@@ -123,8 +123,10 @@ export async function deleteAnalysisBundle(projectId: string): Promise<void> {
   }
 }
 
+import { deleteSfxPlan } from '@/ai/sfx-types';
+
 /**
- * Delete a project and its associated video blob and analysis bundle.
+ * Delete a project and its associated video blob, analysis bundle, and sfx plan.
  */
 export async function deleteStoredProject(projectId: string): Promise<void> {
   try {
@@ -133,6 +135,7 @@ export async function deleteStoredProject(projectId: string): Promise<void> {
     await saveStoredProjects(updated);
     await del(`${VIDEO_KEY_PREFIX}${projectId}`);
     await del(`${ANALYSIS_KEY_PREFIX}${projectId}`);
+    await deleteSfxPlan(projectId);
   } catch (err) {
     console.error(`Failed to delete project ${projectId}:`, err);
     throw err;
@@ -146,7 +149,10 @@ export async function clearAllStoredData(): Promise<void> {
   try {
     const allKeys = await keys();
     for (const key of allKeys) {
-      if (typeof key === 'string' && (key.startsWith('sfx_ai_') || key === PROJECTS_KEY)) {
+      if (
+        typeof key === 'string' &&
+        (key.startsWith('sfx_ai_') || key.startsWith('sfxplan:') || key === PROJECTS_KEY)
+      ) {
         await del(key);
       }
     }

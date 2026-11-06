@@ -1,9 +1,28 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useAppStore } from '@/stores/use-app-store';
 import { useToast } from '@/components/Toast';
-import { X, Eye, EyeOff, Key, Trash2, CheckCircle2, AlertCircle, Loader2, ExternalLink } from 'lucide-react';
+import {
+  X,
+  Eye,
+  EyeOff,
+  Key,
+  Trash2,
+  CheckCircle2,
+  AlertCircle,
+  Loader2,
+  ExternalLink,
+  Cpu,
+  RefreshCw,
+  Activity,
+} from 'lucide-react';
+import {
+  discoverGeminiModels,
+  getSelectedModel,
+  setSelectedModel,
+  getAiCallsToday,
+} from '@/ai/gemini';
 
 export function SettingsModal() {
   const {
@@ -22,6 +41,24 @@ export function SettingsModal() {
   const [showClearConfirm, setShowClearConfirm] = useState(false);
   const [isClearing, setIsClearing] = useState(false);
 
+  // Model selection & discovery state
+  const [models, setModels] = useState<string[]>([]);
+  const [currentModel, setCurrentModel] = useState<string>(() => getSelectedModel());
+  const [isRefreshingModels, setIsRefreshingModels] = useState(false);
+  const [aiCallsToday, setAiCallsToday] = useState<number>(() => getAiCallsToday());
+
+  useEffect(() => {
+    if (apiKey.trim()) {
+      discoverGeminiModels(apiKey, false)
+        .then((m) => {
+          setModels(m);
+        })
+        .catch(() => {
+          // ignore initial load failure
+        });
+    }
+  }, [apiKey]);
+
   if (!isSettingsOpen) return null;
 
   const handleClearAll = async () => {
@@ -29,7 +66,7 @@ export function SettingsModal() {
     try {
       await clearAllData();
       setShowClearConfirm(false);
-      showToast('All projects and video files have been cleared.');
+      showToast('All projects, video files, and SFX plans have been cleared.');
     } catch (err) {
       showToast(`Failed to clear data: ${(err as Error).message}`, 'error');
     } finally {
@@ -37,8 +74,34 @@ export function SettingsModal() {
     }
   };
 
+  const handleModelChange = (model: string) => {
+    setCurrentModel(model);
+    setSelectedModel(model);
+  };
+
+  const handleRefreshModels = async () => {
+    if (!apiKey.trim()) {
+      showToast('Enter your API key first to discover models.', 'error');
+      return;
+    }
+    setIsRefreshingModels(true);
+    try {
+      const refreshed = await discoverGeminiModels(apiKey, true);
+      setModels(refreshed);
+      showToast(`Refreshed: ${refreshed.length} Gemini models discovered.`);
+    } catch (err) {
+      showToast(`Failed to discover models: ${(err as Error).message}`, 'error');
+    } finally {
+      setIsRefreshingModels(false);
+    }
+  };
+
   const formattedTestDate = keyTestState.testedAt
-    ? new Date(keyTestState.testedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    ? new Date(keyTestState.testedAt).toLocaleTimeString([], {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      })
     : null;
 
   return (
@@ -154,10 +217,63 @@ export function SettingsModal() {
             </div>
           </div>
 
+          {/* Model Selector & API Usage Section */}
+          <div className="border-t border-[var(--ink-3)] pt-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Cpu className="w-4 h-4 text-[var(--volt)]" />
+                <h3 className="text-sm font-semibold text-[var(--text)]">Gemini Model</h3>
+              </div>
+              <button
+                type="button"
+                onClick={handleRefreshModels}
+                disabled={isRefreshingModels || !apiKey.trim()}
+                className="px-2.5 py-1.5 rounded-[8px] bg-[var(--ink)] border border-[var(--ink-3)] text-xs font-medium text-[var(--text-2)] hover:text-[var(--text)] hover:border-[var(--volt)] transition-colors inline-flex items-center gap-1.5 disabled:opacity-40 min-h-[36px]"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingModels ? 'animate-spin text-[var(--volt)]' : ''}`} />
+                <span>Refresh models</span>
+              </button>
+            </div>
+
+            <div className="space-y-1.5">
+              <label htmlFor="model-select" className="text-xs text-[var(--text-2)] block">
+                Selected model (Auto chooses highest ranked Flash model)
+              </label>
+              <select
+                id="model-select"
+                value={currentModel}
+                onChange={(e) => handleModelChange(e.target.value)}
+                className="w-full bg-[var(--ink)] border border-[var(--ink-3)] rounded-[10px] px-3.5 py-2.5 text-xs text-[var(--text)] font-mono focus:border-[var(--volt)] focus:outline-none transition-colors min-h-[44px]"
+              >
+                <option value="auto">Auto (Best ranked model)</option>
+                {models.map((m) => {
+                  const label = m.replace(/^models\//, '');
+                  return (
+                    <option key={m} value={m}>
+                      {label}
+                    </option>
+                  );
+                })}
+              </select>
+            </div>
+
+            {/* AI Calls Today Counter */}
+            <div className="flex items-center justify-between p-3 rounded-[10px] bg-[var(--ink)] border border-[var(--ink-3)] text-xs">
+              <div className="flex items-center gap-2 text-[var(--text-2)]">
+                <Activity className="w-4 h-4 text-[var(--volt)]" />
+                <span>API Usage</span>
+              </div>
+              <span className="font-mono font-medium text-[var(--text)]">
+                AI calls today: {aiCallsToday}
+              </span>
+            </div>
+          </div>
+
+          {/* Data Storage Section */}
           <div className="border-t border-[var(--ink-3)] pt-6">
             <h3 className="text-sm font-semibold text-[var(--text)] mb-1">Data Storage</h3>
             <p className="text-xs text-[var(--text-2)] mb-4 leading-relaxed">
-              Video files and project metadata are stored exclusively inside your browser&apos;s IndexedDB. No videos or keys are uploaded to any server.
+              Video files, analysis data, and SFX plans are stored exclusively inside your browser&apos;s IndexedDB. No videos or keys are uploaded to any server.
             </p>
 
             {showClearConfirm ? (
