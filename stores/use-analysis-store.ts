@@ -22,7 +22,6 @@ export interface AnalysisState {
   reset(): void;
   cancelRequested: boolean;
   requestCancel(): void;
-  retryStep(id: string): void;
 }
 
 export const useAnalysisStore = create<AnalysisState>((set) => ({
@@ -65,19 +64,4 @@ export const useAnalysisStore = create<AnalysisState>((set) => ({
     set({
       cancelRequested: true,
     }),
-
-  retryStep: (id: string) =>
-    set((state) => ({
-      steps: state.steps.map((step) =>
-        step.id === id
-          ? {
-              ...step,
-              status: 'running' as const,
-              error: undefined,
-              startedAt: Date.now(),
-              endedAt: undefined,
-            }
-          : step
-      ),
-    })),
 }));

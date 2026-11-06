@@ -1,4 +1,5 @@
 import { get, set, del, keys } from 'idb-keyval';
+import { AnalysisBundle } from '@/types/analysis';
 
 export type ProjectStatus = 'saving' | 'probing' | 'ready' | 'failed';
 
@@ -13,10 +14,12 @@ export interface ProjectMetadata {
   thumbnailDataUrl?: string;
   status: ProjectStatus;
   error?: string;
+  lastModified?: number;
 }
 
 const PROJECTS_KEY = 'sfx_ai_projects_list';
 const VIDEO_KEY_PREFIX = 'sfx_ai_video_blob_';
+const ANALYSIS_KEY_PREFIX = 'sfx_ai_analysis_bundle_';
 
 /**
  * Request persistent browser storage to avoid eviction.
@@ -85,7 +88,43 @@ export async function getVideoBlob(projectId: string): Promise<Blob | null> {
 }
 
 /**
- * Delete a project and its associated video blob.
+ * Save analysis bundle into IndexedDB.
+ */
+export async function saveAnalysisBundle(bundle: AnalysisBundle): Promise<void> {
+  try {
+    await set(`${ANALYSIS_KEY_PREFIX}${bundle.projectId}`, bundle);
+  } catch (err) {
+    console.error(`Failed to save analysis bundle for project ${bundle.projectId}:`, err);
+    throw err;
+  }
+}
+
+/**
+ * Retrieve analysis bundle for a project from IndexedDB.
+ */
+export async function getAnalysisBundle(projectId: string): Promise<AnalysisBundle | null> {
+  try {
+    const bundle = await get<AnalysisBundle>(`${ANALYSIS_KEY_PREFIX}${projectId}`);
+    return bundle || null;
+  } catch (err) {
+    console.error(`Failed to load analysis bundle for project ${projectId}:`, err);
+    return null;
+  }
+}
+
+/**
+ * Delete analysis bundle for a project.
+ */
+export async function deleteAnalysisBundle(projectId: string): Promise<void> {
+  try {
+    await del(`${ANALYSIS_KEY_PREFIX}${projectId}`);
+  } catch (err) {
+    console.error(`Failed to delete analysis bundle for project ${projectId}:`, err);
+  }
+}
+
+/**
+ * Delete a project and its associated video blob and analysis bundle.
  */
 export async function deleteStoredProject(projectId: string): Promise<void> {
   try {
@@ -93,6 +132,7 @@ export async function deleteStoredProject(projectId: string): Promise<void> {
     const updated = current.filter((p) => p.id !== projectId);
     await saveStoredProjects(updated);
     await del(`${VIDEO_KEY_PREFIX}${projectId}`);
+    await del(`${ANALYSIS_KEY_PREFIX}${projectId}`);
   } catch (err) {
     console.error(`Failed to delete project ${projectId}:`, err);
     throw err;
@@ -100,7 +140,7 @@ export async function deleteStoredProject(projectId: string): Promise<void> {
 }
 
 /**
- * Clear all project metadata and video blobs from IndexedDB.
+ * Clear all project metadata, video blobs, and analysis bundles from IndexedDB.
  */
 export async function clearAllStoredData(): Promise<void> {
   try {

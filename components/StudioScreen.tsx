@@ -2,9 +2,13 @@
 
 import React, { useEffect, useState, useRef } from 'react';
 import { useAppStore } from '@/stores/use-app-store';
-import { getVideoBlob } from '@/lib/storage';
+import { getVideoBlob, getAnalysisBundle, deleteAnalysisBundle } from '@/lib/storage';
 import { formatDuration, formatBytes } from '@/lib/format';
 import { useToast } from '@/components/Toast';
+import { AnalysisBundle } from '@/types/analysis';
+import { AnalysisView } from '@/components/AnalysisView';
+import { runAnalysisEngine } from '@/analysis/engine';
+import { useAnalysisStore } from '@/stores/use-analysis-store';
 import {
   ArrowLeft,
   Settings,
@@ -13,6 +17,11 @@ import {
   Loader2,
   RefreshCw,
   Film,
+  CheckCircle2,
+  Cpu,
+  Layers,
+  Volume2,
+  VolumeX,
 } from 'lucide-react';
 
 export function StudioScreen() {
@@ -29,10 +38,37 @@ export function StudioScreen() {
   const { showToast } = useToast();
   const [videoObjectUrl, setVideoObjectUrl] = useState<string | null>(null);
   const [loadedProjectId, setLoadedProjectId] = useState<string | null>(null);
+  const [bundle, setBundle] = useState<AnalysisBundle | null>(null);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+
+  const videoRef = useRef<HTMLVideoElement | null>(null);
   const activeUrlRef = useRef<string | null>(null);
 
   const project = projects.find((p) => p.id === activeProjectId);
   const isLoadingBlob = Boolean(activeProjectId && loadedProjectId !== activeProjectId);
+
+  // Load analysis bundle from IndexedDB asynchronously
+  useEffect(() => {
+    let isCancelled = false;
+
+    if (!activeProjectId) {
+      return;
+    }
+
+    getAnalysisBundle(activeProjectId)
+      .then((stored) => {
+        if (!isCancelled) {
+          setBundle(stored);
+        }
+      })
+      .catch((err) => {
+        console.error('Failed to load analysis bundle:', err);
+      });
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [activeProjectId]);
 
   // Load video blob from IndexedDB and create runtime object URL
   useEffect(() => {
@@ -104,11 +140,43 @@ export function StudioScreen() {
     disabledReason = 'Test your Gemini API key in Settings';
   }
 
-  const isAnalyzeEnabled = isVideoReady && hasKey && isKeyTestedAndValid;
+  const isAnalyzeEnabled = isVideoReady && hasKey && isKeyTestedAndValid && !isAnalyzing;
 
-  const handleAnalyzeClick = () => {
-    if (!isAnalyzeEnabled) return;
-    showToast('Analysis engine is not installed yet');
+  // Run the real analysis engine
+  const handleAnalyzeClick = async (force = false) => {
+    if (!isAnalyzeEnabled && !force) return;
+    setIsAnalyzing(true);
+    setScreen('analyzing');
+
+    try {
+      const result = await runAnalysisEngine(project, { forceReanalyze: force });
+      if (result) {
+        setBundle(result);
+        setScreen('studio');
+        showToast('Analysis complete');
+      }
+    } catch (err) {
+      console.error('Analysis failed:', err);
+      const isCancel =
+        (err as Error)?.message === 'Analysis cancelled by user.' ||
+        useAnalysisStore.getState().cancelRequested;
+      if (!isCancel) {
+        showToast((err as Error).message, 'error');
+      }
+    } finally {
+      setIsAnalyzing(false);
+    }
+  };
+
+  const handleReanalyze = async () => {
+    if (!project) return;
+    try {
+      await deleteAnalysisBundle(project.id);
+      setBundle(null);
+      await handleAnalyzeClick(true);
+    } catch (err) {
+      showToast(`Re-analysis failed: ${(err as Error).message}`, 'error');
+    }
   };
 
   return (
@@ -147,8 +215,9 @@ export function StudioScreen() {
       {/* Main Studio Workspace */}
       <main className="flex-1 max-w-6xl w-full mx-auto px-4 sm:px-8 py-6 safe-padding-bottom">
         <div className="flex flex-col lg:grid lg:grid-cols-12 gap-6 items-start">
-          {/* Left / Top: Native Video Player */}
-          <div className="w-full lg:col-span-7 flex flex-col gap-4">
+          {/* Left / Top: Native Video Player & Analysis View */}
+          <div className="w-full lg:col-span-7 flex flex-col gap-5">
+            {/* Native Video Player */}
             <div className="w-full aspect-video rounded-[var(--radius)] bg-[var(--ink-2)] border border-[var(--ink-3)] overflow-hidden flex items-center justify-center relative">
               {isLoadingBlob ? (
                 <div className="flex flex-col items-center gap-2 text-xs text-[var(--text-2)]">
@@ -182,6 +251,7 @@ export function StudioScreen() {
                 </div>
               ) : videoObjectUrl ? (
                 <video
+                  ref={videoRef}
                   src={videoObjectUrl}
                   controls
                   playsInline
@@ -194,6 +264,111 @@ export function StudioScreen() {
                 </div>
               )}
             </div>
+
+            {/* Analysis View (Loudness Waveform, Cuts, Transients, Playhead) */}
+            {bundle && (
+              <AnalysisView
+                bundle={bundle}
+                videoRef={videoRef}
+                onSeek={(time) => {
+                  if (videoRef.current) {
+                    videoRef.current.currentTime = time;
+                  }
+                }}
+              />
+            )}
+
+            {/* Compact Analysis Report Card */}
+            {bundle && (
+              <div className="rounded-[var(--radius)] bg-[var(--ink-2)] border border-[var(--ink-3)] p-5 space-y-4">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <CheckCircle2 className="w-4 h-4 text-[var(--volt)]" />
+                    <h2 className="text-sm font-bold text-[var(--text)] tracking-tight">
+                      Analysis Report
+                    </h2>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleReanalyze}
+                    className="px-3 py-1.5 rounded-[8px] border border-[var(--ink-3)] text-xs font-medium text-[var(--text)] hover:border-[var(--volt)] hover:text-[var(--volt)] transition-colors inline-flex items-center gap-1.5 min-h-[36px]"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    Re-analyze
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+                  <div className="p-2.5 rounded-[8px] bg-[var(--ink)] border border-[var(--ink-3)]">
+                    <span className="text-[11px] text-[var(--text-2)] block mb-0.5">Duration</span>
+                    <span className="font-mono font-medium text-[var(--text)] tabular-nums">
+                      {bundle.duration.toFixed(1)}s
+                    </span>
+                  </div>
+                  <div className="p-2.5 rounded-[8px] bg-[var(--ink)] border border-[var(--ink-3)]">
+                    <span className="text-[11px] text-[var(--text-2)] block mb-0.5">Frame rate</span>
+                    <span className="font-mono font-medium text-[var(--text)] tabular-nums">
+                      {bundle.fps ? `${bundle.fps} fps` : 'Variable'}
+                    </span>
+                  </div>
+                  <div className="p-2.5 rounded-[8px] bg-[var(--ink)] border border-[var(--ink-3)]">
+                    <span className="text-[11px] text-[var(--text-2)] block mb-0.5">Audio</span>
+                    <span className="font-mono font-medium text-[var(--text)] flex items-center gap-1">
+                      {bundle.hasAudio ? (
+                        <>
+                          <Volume2 className="w-3.5 h-3.5 text-[var(--volt)]" />
+                          <span>16 kHz mono</span>
+                        </>
+                      ) : (
+                        <>
+                          <VolumeX className="w-3.5 h-3.5 text-[var(--text-2)]" />
+                          <span>No audio track</span>
+                        </>
+                      )}
+                    </span>
+                  </div>
+                  <div className="p-2.5 rounded-[8px] bg-[var(--ink)] border border-[var(--ink-3)]">
+                    <span className="text-[11px] text-[var(--text-2)] block mb-0.5">Scene cuts</span>
+                    <span className="font-mono font-medium text-[var(--text)] tabular-nums">
+                      {bundle.cuts.length} cuts
+                    </span>
+                  </div>
+
+                  <div className="p-2.5 rounded-[8px] bg-[var(--ink)] border border-[var(--ink-3)]">
+                    <span className="text-[11px] text-[var(--text-2)] block mb-0.5">Transients</span>
+                    <span className="font-mono font-medium text-[var(--text)] tabular-nums">
+                      {bundle.transients.length} sound hits
+                    </span>
+                  </div>
+                  <div className="p-2.5 rounded-[8px] bg-[var(--ink)] border border-[var(--ink-3)]">
+                    <span className="text-[11px] text-[var(--text-2)] block mb-0.5">Quiet gaps</span>
+                    <span className="font-mono font-medium text-[var(--text)] tabular-nums">
+                      {bundle.quietGaps.length} pauses
+                    </span>
+                  </div>
+                  <div className="p-2.5 rounded-[8px] bg-[var(--ink)] border border-[var(--ink-3)]">
+                    <span className="text-[11px] text-[var(--text-2)] block mb-0.5">Frames sampled</span>
+                    <span className="font-mono font-medium text-[var(--text)] tabular-nums">
+                      {bundle.samples.length} at 1 fps
+                    </span>
+                  </div>
+                  <div className="p-2.5 rounded-[8px] bg-[var(--ink)] border border-[var(--ink-3)]">
+                    <span className="text-[11px] text-[var(--text-2)] block mb-0.5">AI Payload</span>
+                    <span className="font-mono font-medium text-[var(--text)] tabular-nums">
+                      {bundle.stats.payloadMB} MB
+                    </span>
+                  </div>
+                </div>
+
+                <div className="pt-2 border-t border-[var(--ink-3)] flex items-center justify-between text-xs text-[var(--text-2)] font-mono">
+                  <span className="flex items-center gap-1.5">
+                    <Cpu className="w-3.5 h-3.5" />
+                    <span>Mode: {bundle.stats.mode}</span>
+                  </span>
+                  <span>Time taken: {(bundle.stats.tookMs / 1000).toFixed(1)}s</span>
+                </div>
+              </div>
+            )}
 
             {/* Video Metadata summary under player */}
             <div className="rounded-[12px] bg-[var(--ink-2)] border border-[var(--ink-3)] p-4 sm:p-5">
@@ -248,23 +423,23 @@ export function StudioScreen() {
             <div className="rounded-[var(--radius)] bg-[var(--ink-2)] border border-[var(--ink-3)] p-5 sm:p-6 space-y-5">
               <div>
                 <h2 className="text-base font-bold text-[var(--text)] tracking-tight">
-                  Audio Generation
+                  Audio Analysis &amp; SFX
                 </h2>
                 <p className="text-xs text-[var(--text-2)] mt-1 leading-relaxed">
-                  Analyze video motion, events, and scene transitions to synthesize tailored sound effects.
+                  Real client-side audio decoding, frame diff scene cut detection, and transient extraction.
                 </p>
               </div>
 
-              {/* The Volt Analyze Button */}
+              {/* The Volt Analyze Button or Status */}
               <div className="space-y-2">
                 <button
                   type="button"
-                  onClick={handleAnalyzeClick}
+                  onClick={() => handleAnalyzeClick(false)}
                   disabled={!isAnalyzeEnabled}
                   className="w-full flex items-center justify-center gap-2 px-6 py-3.5 rounded-[12px] bg-[var(--volt)] text-[var(--volt-ink)] font-bold text-sm tracking-wide uppercase transition-all disabled:opacity-40 disabled:cursor-not-allowed hover:opacity-95 min-h-[48px]"
                 >
                   <Sparkles className="w-4 h-4" />
-                  Analyze
+                  {bundle ? 'Re-run Analysis' : 'Analyze'}
                 </button>
 
                 {/* One-line reason under Analyze button when disabled */}
@@ -284,10 +459,10 @@ export function StudioScreen() {
                 )}
               </div>
 
-              {/* API Key requirement checklist */}
+              {/* Prerequisites and Bundle status checklist */}
               <div className="pt-2 border-t border-[var(--ink-3)] space-y-2.5 text-xs">
                 <span className="text-[11px] font-semibold uppercase tracking-wider text-[var(--text-2)]">
-                  Prerequisites
+                  Pipeline Status
                 </span>
                 <div className="flex items-center justify-between text-[var(--text-2)]">
                   <span>Video loaded &amp; probed</span>
@@ -306,6 +481,24 @@ export function StudioScreen() {
                   <span className={`font-mono text-xs ${isKeyTestedAndValid ? 'text-[var(--volt)]' : 'text-[var(--text-2)]'}`}>
                     {isKeyTestedAndValid ? 'Verified' : 'Unverified'}
                   </span>
+                </div>
+                <div className="flex items-center justify-between text-[var(--text-2)]">
+                  <span>Analysis cache</span>
+                  <span className={`font-mono text-xs ${bundle ? 'text-[var(--volt)]' : 'text-[var(--text-2)]'}`}>
+                    {bundle ? 'Cached in IndexedDB' : 'Not computed yet'}
+                  </span>
+                </div>
+              </div>
+
+              {/* Features computed in Step 2 */}
+              <div className="pt-3 border-t border-[var(--ink-3)] space-y-2 text-xs text-[var(--text-2)]">
+                <div className="flex items-center gap-2">
+                  <Layers className="w-3.5 h-3.5 text-[var(--volt)]" />
+                  <span>Real scene cuts &amp; 1 fps video reference</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Volume2 className="w-3.5 h-3.5 text-[var(--volt)]" />
+                  <span>16 kHz PCM WAV + 50 Hz RMS dynamics</span>
                 </div>
               </div>
             </div>

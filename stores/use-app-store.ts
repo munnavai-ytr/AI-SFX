@@ -235,6 +235,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       id: projectId,
       name: file.name,
       createdAt: Date.now(),
+      lastModified: file.lastModified || Date.now(),
       duration: 0,
       width: 0,
       height: 0,

@@ -11,6 +11,7 @@ import {
   Loader2,
   MinusCircle,
   RotateCcw,
+  Play,
 } from 'lucide-react';
 
 function formatElapsed(startedAt?: number, endedAt?: number, currentTime?: number): string | null {
@@ -50,13 +51,25 @@ function useCurrentTime(active: boolean, intervalMs = 250): number {
 }
 
 export function AnalyzingScreen() {
-  const { steps, running, cancelRequested, requestCancel, retryStep } = useAnalysisStore();
-  const { setScreen } = useAppStore();
+  const { steps, running, cancelRequested, requestCancel } = useAnalysisStore();
+  const { activeProjectId, projects, setScreen } = useAppStore();
 
   const currentTime = useCurrentTime(running, 250);
+  const project = projects.find((p) => p.id === activeProjectId);
 
-  const handleRetryStep = (stepId: string) => {
-    retryStep(stepId);
+  const isCancelled = cancelRequested && !running;
+
+  const handleRunFullPipeline = async () => {
+    if (!project) return;
+    try {
+      const { runAnalysisEngine } = await import('@/analysis/engine');
+      const bundle = await runAnalysisEngine(project, { forceReanalyze: true });
+      if (bundle) {
+        setScreen('studio');
+      }
+    } catch (err) {
+      console.error('Analysis execution failed:', err);
+    }
   };
 
   // If the store has no run
@@ -101,7 +114,13 @@ export function AnalyzingScreen() {
                 Video Analysis
               </h1>
               <p className="text-xs text-[var(--text-2)] font-mono">
-                {running ? (cancelRequested ? 'Cancelling...' : 'Processing in browser') : 'Finished'}
+                {running
+                  ? cancelRequested
+                    ? 'Cancelling...'
+                    : 'Processing in browser'
+                  : isCancelled
+                  ? 'Analysis cancelled'
+                  : 'Finished'}
               </p>
             </div>
           </div>
@@ -116,11 +135,58 @@ export function AnalyzingScreen() {
               {cancelRequested ? 'Cancelling...' : 'Cancel'}
             </button>
           )}
+
+          {isCancelled && (
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setScreen('studio')}
+                className="px-3.5 py-1.5 rounded-[8px] border border-[var(--ink-3)] text-xs font-semibold text-[var(--text-2)] hover:text-[var(--text)] transition-colors min-h-[40px]"
+              >
+                Back
+              </button>
+              <button
+                type="button"
+                onClick={handleRunFullPipeline}
+                className="px-3.5 py-1.5 rounded-[8px] bg-[var(--volt)] text-[var(--volt-ink)] text-xs font-semibold hover:opacity-95 transition-opacity min-h-[40px] inline-flex items-center gap-1.5"
+              >
+                <Play className="w-3.5 h-3.5" />
+                Start again
+              </button>
+            </div>
+          )}
         </div>
       </header>
 
       {/* Main step list */}
       <main className="flex-1 max-w-3xl w-full mx-auto px-4 sm:px-8 py-6 sm:py-8 safe-padding-bottom space-y-4">
+        {/* Cancelled notice banner */}
+        {isCancelled && (
+          <div className="p-4 rounded-[12px] bg-[var(--ink-2)] border border-[var(--ink-3)] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <p className="text-sm font-semibold text-[var(--text)]">Analysis cancelled</p>
+              <p className="text-xs text-[var(--text-2)]">You stopped the video analysis process.</p>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => setScreen('studio')}
+                className="px-3.5 py-1.5 rounded-[8px] border border-[var(--ink-3)] text-xs font-semibold text-[var(--text-2)] hover:text-[var(--text)] transition-colors min-h-[38px]"
+              >
+                Back
+              </button>
+              <button
+                type="button"
+                onClick={handleRunFullPipeline}
+                className="px-3.5 py-1.5 rounded-[8px] bg-[var(--volt)] text-[var(--volt-ink)] text-xs font-semibold hover:opacity-95 transition-opacity min-h-[38px] inline-flex items-center gap-1.5"
+              >
+                <Play className="w-3.5 h-3.5" />
+                Start again
+              </button>
+            </div>
+          </div>
+        )}
+
         <div className="space-y-3">
           {steps.map((step) => {
             const elapsed = formatElapsed(
@@ -165,7 +231,7 @@ export function AnalyzingScreen() {
                     {step.status === 'failed' && (
                       <button
                         type="button"
-                        onClick={() => handleRetryStep(step.id)}
+                        onClick={handleRunFullPipeline}
                         className="px-3 py-1.5 rounded-[6px] bg-[var(--ink-3)] text-xs font-medium text-[var(--text)] hover:bg-[var(--ink-3)]/80 inline-flex items-center gap-1.5 min-h-[36px]"
                       >
                         <RotateCcw className="w-3.5 h-3.5" />
@@ -182,12 +248,12 @@ export function AnalyzingScreen() {
                       <div className="space-y-1">
                         <div className="flex justify-between text-[11px] font-mono text-[var(--text-2)] tabular-nums">
                           <span>Progress</span>
-                          <span>{Math.round(step.progress)}%</span>
+                          <span>{Math.round(step.progress * 100)}%</span>
                         </div>
                         <div className="w-full h-1.5 rounded-full bg-[var(--ink-3)] overflow-hidden">
                           <div
                             className="h-full bg-[var(--volt)] transition-all duration-200"
-                            style={{ width: `${Math.min(100, Math.max(0, step.progress))}%` }}
+                            style={{ width: `${Math.min(100, Math.max(0, step.progress * 100))}%` }}
                           />
                         </div>
                       </div>
