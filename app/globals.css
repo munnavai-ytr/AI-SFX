@@ -1,0 +1,69 @@
+@import "tailwindcss";
+
+:root {
+  --ink: #0B0D12;        /* background */
+  --ink-2: #14171E;      /* cards */
+  --ink-3: #1D212B;      /* borders / hover */
+  --volt: #B6FF3B;       /* the ONLY accent */
+  --volt-ink: #0B0D12;   /* text on volt */
+  --text: #F4F6FA;
+  --text-2: #9AA3B2;
+  --danger: #FF5C5C;     /* errors only */
+  --radius: 16px;
+}
+
+@theme {
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-volt: var(--volt);
+  --color-volt-ink: var(--volt-ink);
+  --color-text: var(--text);
+  --color-text-2: var(--text-2);
+  --color-danger: var(--danger);
+  --radius-default: var(--radius);
+  --font-sans: var(--font-inter), system-ui, sans-serif;
+  --font-mono: var(--font-mono), monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  background-color: var(--ink);
+  color: var(--text);
+  font-family: var(--font-inter), system-ui, sans-serif;
+  min-height: 100vh;
+  margin: 0;
+  padding: 0;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Flat design, no default shadows. Active / focus glow in volt */
+.glow-volt {
+  box-shadow: 0 0 0 1px var(--volt), 0 0 24px rgba(182, 255, 59, 0.25);
+}
+
+.glow-volt-border {
+  box-shadow: 0 0 0 1px var(--volt);
+}
+
+/* Accessible focus ring in volt */
+button:focus-visible,
+input:focus-visible,
+a:focus-visible,
+[tabindex]:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 1px var(--volt), 0 0 24px rgba(182, 255, 59, 0.25);
+}
+
+/* Safe area insets for mobile & Capacitor */
+.safe-padding-top {
+  padding-top: max(env(safe-area-inset-top, 0px), 16px);
+}
+
+.safe-padding-bottom {
+  padding-bottom: max(env(safe-area-inset-bottom, 0px), 16px);
+}

@@ -1,0 +1,6 @@
+{
+  "name": "SFX AI",
+  "description": "AI-powered sound effects for video creators. Step 1: project setup, video management, and API key testing.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
