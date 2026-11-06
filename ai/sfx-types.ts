@@ -80,7 +80,31 @@ export interface SfxPlan {
   rawResponse: string; // for the debug view
 }
 
+export interface SfxEditEvent {
+  id: string;
+  time: number;
+  type: SfxType;
+  variant: number; // 0, 1, 2
+  volume: number; // 0..1
+  intent: SfxIntent;
+  enabled: boolean;
+  reason?: string;
+  confidence?: number;
+  snapped?: 'cut' | 'transient' | 'none';
+}
+
+export interface SfxEditState {
+  projectId: string;
+  events: SfxEditEvent[];
+  density: 'auto' | 'minimal' | 'balanced' | 'heavy';
+  masterVolume: number;
+  syncOffsetMs: number;
+  updatedAt: number;
+  hasManualEdits?: boolean;
+}
+
 const SFX_PLAN_KEY_PREFIX = 'sfxplan:';
+const SFX_EDIT_KEY_PREFIX = 'sfxedit:';
 
 export async function saveSfxPlan(plan: SfxPlan): Promise<void> {
   try {
@@ -108,3 +132,30 @@ export async function deleteSfxPlan(projectId: string): Promise<void> {
     console.error(`Failed to delete SFX plan for project ${projectId}:`, err);
   }
 }
+
+export async function saveSfxEditState(state: SfxEditState): Promise<void> {
+  try {
+    await set(`${SFX_EDIT_KEY_PREFIX}${state.projectId}`, state);
+  } catch (err) {
+    console.error(`Failed to save SFX edit state for project ${state.projectId}:`, err);
+  }
+}
+
+export async function getSfxEditState(projectId: string): Promise<SfxEditState | null> {
+  try {
+    const state = await get<SfxEditState>(`${SFX_EDIT_KEY_PREFIX}${projectId}`);
+    return state || null;
+  } catch (err) {
+    console.error(`Failed to load SFX edit state for project ${projectId}:`, err);
+    return null;
+  }
+}
+
+export async function deleteSfxEditState(projectId: string): Promise<void> {
+  try {
+    await del(`${SFX_EDIT_KEY_PREFIX}${projectId}`);
+  } catch (err) {
+    console.error(`Failed to delete SFX edit state for project ${projectId}:`, err);
+  }
+}
+

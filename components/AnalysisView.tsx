@@ -2,33 +2,42 @@
 
 import React, { useRef, useEffect, useCallback, useState } from 'react';
 import { AnalysisBundle } from '@/types/analysis';
-import { SfxEvent } from '@/ai/sfx-types';
+import { SfxEditEvent } from '@/ai/sfx-types';
 import { formatDuration } from '@/lib/format';
 
 interface AnalysisViewProps {
   bundle: AnalysisBundle;
-  events?: SfxEvent[];
+  events?: SfxEditEvent[];
+  selectedEventId?: string | null;
   videoRef: React.RefObject<HTMLVideoElement | null>;
   onSeek: (targetTime: number) => void;
-  onSelectEvent?: (event: SfxEvent) => void;
+  onSelectEvent?: (event: SfxEditEvent) => void;
+  onEventTimeChange?: (id: string, newTime: number) => void;
 }
 
 export function AnalysisView({
   bundle,
   events = [],
+  selectedEventId,
   videoRef,
   onSeek,
   onSelectEvent,
+  onEventTimeChange,
 }: AnalysisViewProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const lastDrawTimeRef = useRef<number>(0);
-  const [activeEvent, setActiveEvent] = useState<SfxEvent | null>(null);
+
+  const [draggingEventId, setDraggingEventId] = useState<string | null>(null);
 
   const duration = bundle.duration || 1;
+  const cuts = React.useMemo(() => (bundle.cuts ? bundle.cuts.map((c) => c.t) : []), [bundle.cuts]);
+  const transients = React.useMemo(() => (bundle.transients ? bundle.transients.map((tr) => tr.t) : []), [bundle.transients]);
+
+  const activeEvent = events.find((e) => e.id === selectedEventId) || null;
 
   const draw = useCallback(
-    (currentTime: number, highlightedEvent: SfxEvent | null) => {
+    (currentTime: number, highlightedId: string | null) => {
       const canvas = canvasRef.current;
       if (!canvas) return;
       const ctx = canvas.getContext('2d');
@@ -138,7 +147,8 @@ export function AnalysisView({
 
         for (const ev of events) {
           const x = (ev.time / duration) * width;
-          const isHighlighted = highlightedEvent?.id === ev.id;
+          const isHighlighted = highlightedId === ev.id;
+          const isEnabled = ev.enabled !== false;
 
           // Diamond path
           ctx.beginPath();
@@ -148,24 +158,35 @@ export function AnalysisView({
           ctx.lineTo(x - (isHighlighted ? dSize + 2 : dSize), diamondY);
           ctx.closePath();
 
-          ctx.fillStyle = '#B6FF3B'; // volt
+          ctx.fillStyle = isEnabled ? '#B6FF3B' : '#9AA3B2'; // volt or grey
           ctx.fill();
 
-          ctx.strokeStyle = '#0B0D12'; // ink
-          ctx.lineWidth = 1;
+          ctx.strokeStyle = isHighlighted ? '#FFFFFF' : '#0B0D12';
+          ctx.lineWidth = isHighlighted ? 1.5 : 1;
           ctx.stroke();
+
+          // Outer volt glow ring for highlighted item
+          if (isHighlighted) {
+            ctx.save();
+            ctx.strokeStyle = 'rgba(182, 255, 59, 0.6)';
+            ctx.lineWidth = 2.5;
+            ctx.beginPath();
+            ctx.arc(x, diamondY, 9, 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.restore();
+          }
 
           // If active/highlighted, render type tag bubble
           if (isHighlighted) {
             ctx.save();
             ctx.font = 'bold 10px monospace';
-            const label = ev.type;
+            const label = `${ev.type} (v${ev.variant + 1})`;
             const textWidth = ctx.measureText(label).width;
             const padX = 6;
             const bubbleW = textWidth + padX * 2;
             const bubbleH = 18;
             const bubbleX = Math.max(4, Math.min(width - bubbleW - 4, x - bubbleW / 2));
-            const bubbleY = diamondY + 8;
+            const bubbleY = diamondY + 10;
 
             ctx.fillStyle = '#0B0D12';
             ctx.strokeStyle = '#B6FF3B';
@@ -214,19 +235,19 @@ export function AnalysisView({
       canvasRef.current.style.width = `${rect.width}px`;
       canvasRef.current.style.height = '96px';
       const videoEl = videoRef.current;
-      draw(videoEl ? videoEl.currentTime : 0, activeEvent);
+      draw(videoEl ? videoEl.currentTime : 0, selectedEventId || null);
     };
 
     handleResize();
     window.addEventListener('resize', handleResize);
     return () => window.removeEventListener('resize', handleResize);
-  }, [draw, videoRef, activeEvent]);
+  }, [draw, videoRef, selectedEventId]);
 
   // Sync playhead with video element at at most 10 fps (100 ms interval)
   useEffect(() => {
     const videoEl = videoRef.current;
     if (!videoEl) {
-      draw(0, activeEvent);
+      draw(0, selectedEventId || null);
       return;
     }
 
@@ -236,7 +257,7 @@ export function AnalysisView({
       const now = performance.now();
       if (now - lastDrawTimeRef.current >= 100) {
         lastDrawTimeRef.current = now;
-        draw(videoEl.currentTime, activeEvent);
+        draw(videoEl.currentTime, selectedEventId || null);
       }
       animationFrameId = requestAnimationFrame(tick);
     };
@@ -245,7 +266,7 @@ export function AnalysisView({
 
     const onSeekedOrPaused = () => {
       lastDrawTimeRef.current = performance.now();
-      draw(videoEl.currentTime, activeEvent);
+      draw(videoEl.currentTime, selectedEventId || null);
     };
 
     videoEl.addEventListener('seeked', onSeekedOrPaused);
@@ -258,44 +279,90 @@ export function AnalysisView({
       videoEl.removeEventListener('pause', onSeekedOrPaused);
       videoEl.removeEventListener('play', onSeekedOrPaused);
     };
-  }, [videoRef, draw, activeEvent]);
+  }, [videoRef, draw, selectedEventId]);
 
-  // Click/tap handling:
-  // If clicking near a diamond (within 8px), seek to 0.5s before it and highlight.
-  // Otherwise seek to clicked timeline position.
-  const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+  // Dragging event marker horizontally with snapping
+  const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (!canvasRef.current) return;
     const rect = canvasRef.current.getBoundingClientRect();
     const clickX = e.clientX - rect.left;
-    const fraction = Math.max(0, Math.min(1, clickX / rect.width));
-    const targetTime = fraction * duration;
 
-    // Check for nearby event within 10 CSS pixels
-    let clickedEvent: SfxEvent | null = null;
-    let minDistance = 10;
+    let closest: SfxEditEvent | null = null;
+    let minDist = 14;
 
     for (const ev of events) {
       const evX = (ev.time / duration) * rect.width;
       const dist = Math.abs(evX - clickX);
-      if (dist < minDistance) {
-        minDistance = dist;
-        clickedEvent = ev;
+      if (dist < minDist) {
+        minDist = dist;
+        closest = ev;
       }
     }
 
-    if (clickedEvent) {
-      setActiveEvent(clickedEvent);
-      onSelectEvent?.(clickedEvent);
-      // "Tapping an event seeks the video to 0.5 s before it."
-      const seekTime = Math.max(0, clickedEvent.time - 0.5);
+    if (closest) {
+      setDraggingEventId(closest.id);
+      onSelectEvent?.(closest);
+      const seekTime = Math.max(0, closest.time - 0.5);
       onSeek(seekTime);
-      draw(seekTime, clickedEvent);
     } else {
-      setActiveEvent(null);
+      const fraction = Math.max(0, Math.min(1, clickX / rect.width));
+      const targetTime = fraction * duration;
       onSeek(targetTime);
       draw(targetTime, null);
     }
   };
+
+  useEffect(() => {
+    if (!draggingEventId) return;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!canvasRef.current || !draggingEventId) return;
+      const rect = canvasRef.current.getBoundingClientRect();
+      const clickX = Math.max(0, Math.min(rect.width, e.clientX - rect.left));
+      let newTime = (clickX / rect.width) * duration;
+
+      // Snap to cuts or transients within 80 ms (0.08 s) unless Alt key held
+      if (!e.altKey) {
+        const snapThreshold = 0.08;
+        let bestSnap: number | null = null;
+        let minDiff = snapThreshold;
+
+        for (const c of cuts) {
+          const diff = Math.abs(c - newTime);
+          if (diff <= minDiff) {
+            minDiff = diff;
+            bestSnap = c;
+          }
+        }
+        for (const tr of transients) {
+          const diff = Math.abs(tr - newTime);
+          if (diff <= minDiff) {
+            minDiff = diff;
+            bestSnap = tr;
+          }
+        }
+
+        if (bestSnap !== null) {
+          newTime = bestSnap;
+        }
+      }
+
+      newTime = Number(Math.min(Math.max(newTime, 0.05), duration - 0.2).toFixed(3));
+      onEventTimeChange?.(draggingEventId, newTime);
+    };
+
+    const handleMouseUp = () => {
+      setDraggingEventId(null);
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [draggingEventId, duration, cuts, transients, onEventTimeChange]);
 
   return (
     <div className="w-full space-y-2">
@@ -305,7 +372,7 @@ export function AnalysisView({
             Timeline View
           </span>
           <span className="text-[11px] text-[var(--text-2)]">
-            Tap timeline or ◆ to seek (-0.5s)
+            Tap or drag ◆ (Alt disables snap)
           </span>
         </div>
         <div className="flex items-center gap-3 text-[11px]">
@@ -332,16 +399,16 @@ export function AnalysisView({
       >
         <canvas
           ref={canvasRef}
-          onClick={handleCanvasClick}
-          className="w-full h-[96px] block"
+          onMouseDown={handleMouseDown}
+          className="w-full h-[96px] block select-none"
         />
       </div>
 
       <div className="flex justify-between text-[11px] font-mono text-[var(--text-2)] px-1">
         <span>0:00</span>
         {activeEvent && (
-          <span className="text-[var(--volt)]">
-            ◆ {activeEvent.type} at {activeEvent.time.toFixed(2)}s
+          <span className="text-[var(--volt)] font-semibold">
+            ◆ {activeEvent.type} (v{activeEvent.variant + 1}) at {activeEvent.time.toFixed(2)}s
           </span>
         )}
         <span>{formatDuration(duration)}</span>

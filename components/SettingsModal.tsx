@@ -16,6 +16,7 @@ import {
   Cpu,
   RefreshCw,
   Activity,
+  Music,
 } from 'lucide-react';
 import {
   discoverGeminiModels,
@@ -23,6 +24,7 @@ import {
   setSelectedModel,
   getAiCallsToday,
 } from '@/ai/gemini';
+import { SfxTestScreen } from '@/components/SfxTestScreen';
 
 export function SettingsModal() {
   const {
@@ -40,6 +42,7 @@ export function SettingsModal() {
   const [showPassword, setShowPassword] = useState(false);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
   const [isClearing, setIsClearing] = useState(false);
+  const [showSoundTest, setShowSoundTest] = useState(false);
 
   // Model selection & discovery state
   const [models, setModels] = useState<string[]>([]);
@@ -60,6 +63,14 @@ export function SettingsModal() {
   }, [apiKey]);
 
   if (!isSettingsOpen) return null;
+
+  if (showSoundTest) {
+    return (
+      <div className="fixed inset-0 z-50 bg-[var(--ink)] overflow-y-auto">
+        <SfxTestScreen onBack={() => setShowSoundTest(false)} />
+      </div>
+    );
+  }
 
   const handleClearAll = async () => {
     setIsClearing(true);
@@ -266,6 +277,18 @@ export function SettingsModal() {
               <span className="font-mono font-medium text-[var(--text)]">
                 AI calls today: {aiCallsToday}
               </span>
+            </div>
+
+            {/* Sound Library Audition Button */}
+            <div className="pt-1 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setShowSoundTest(true)}
+                className="text-xs text-[var(--volt)] hover:underline inline-flex items-center gap-1.5 font-medium py-1"
+              >
+                <Music className="w-3.5 h-3.5" />
+                <span>Sound test (Audition all 30 sounds)</span>
+              </button>
             </div>
           </div>
 
