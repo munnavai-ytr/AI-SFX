@@ -3,6 +3,8 @@
 import React, { useEffect, useState, useRef, useMemo, useCallback } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { useAppStore } from '@/stores/use-app-store';
+import { useKeyStore, KeyStoreState } from '@/stores/use-key-store';
+import { KeySlot } from '@/ai/keyvault';
 import { getVideoBlob, getAnalysisBundle, deleteAnalysisBundle } from '@/lib/storage';
 import { formatDuration, formatBytes } from '@/lib/format';
 import { useToast } from '@/components/Toast';
@@ -90,8 +92,6 @@ export function StudioScreen() {
     projects,
     setScreen,
     openSettings,
-    apiKey,
-    keyTestState,
     retryProject,
   } = useAppStore(
     useShallow((s) => ({
@@ -99,9 +99,14 @@ export function StudioScreen() {
       projects: s.projects,
       setScreen: s.setScreen,
       openSettings: s.openSettings,
-      apiKey: s.apiKey,
-      keyTestState: s.keyTestState,
       retryProject: s.retryProject,
+    }))
+  );
+
+  const { slots, cooldowns } = useKeyStore(
+    useShallow((s: KeyStoreState) => ({
+      slots: s.slots,
+      cooldowns: s.cooldowns,
     }))
   );
 
@@ -142,6 +147,12 @@ export function StudioScreen() {
   const [isOnline, setIsOnline] = useState<boolean>(() =>
     typeof navigator !== 'undefined' ? navigator.onLine : true
   );
+
+  const [now, setNow] = useState(() => (typeof window !== 'undefined' ? Date.now() : 0));
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -558,8 +569,13 @@ export function StudioScreen() {
 
   // Determine disabled state and reason for the Analyze button
   const isVideoReady = project.status === 'ready';
-  const hasKey = Boolean(apiKey.trim());
-  const isKeyTestedAndValid = keyTestState.tested && keyTestState.valid;
+  const enabledSlots: KeySlot[] = slots.filter((s: KeySlot) => s.enabled);
+  const testedValidSlots: KeySlot[] = enabledSlots.filter((s: KeySlot) => !s.invalid && s.tested);
+  const readySlots: KeySlot[] = testedValidSlots.filter((s: KeySlot) => {
+    return !Object.entries(cooldowns).some(
+      ([k, v]) => k.startsWith(`${s.id}|`) && v && (v as { until: number }).until > now
+    );
+  });
 
   let disabledReason: string | null = null;
   if (!isOnline) {
@@ -570,13 +586,26 @@ export function StudioScreen() {
     disabledReason = 'Reading video info...';
   } else if (project.status === 'failed') {
     disabledReason = project.error || 'Video failed to process';
-  } else if (!hasKey) {
-    disabledReason = 'Add your Gemini API key in Settings';
-  } else if (!isKeyTestedAndValid) {
+  } else if (enabledSlots.length === 0) {
+    disabledReason = 'Add a Gemini API key in Settings';
+  } else if (testedValidSlots.length === 0) {
     disabledReason = 'Test your Gemini API key in Settings';
+  } else if (readySlots.length === 0) {
+    // Find soonest ready timestamp
+    const activeCooldowns: number[] = [];
+    for (const s of testedValidSlots) {
+      for (const [k, v] of Object.entries(cooldowns)) {
+        if (k.startsWith(`${s.id}|`) && v && (v as { until: number }).until > now) {
+          activeCooldowns.push((v as { until: number }).until);
+        }
+      }
+    }
+    const soonestReadyAt = activeCooldowns.length > 0 ? Math.min(...activeCooldowns) : now + 41000;
+    const remainingSec = Math.max(1, Math.ceil((soonestReadyAt - now) / 1000));
+    disabledReason = `All keys are cooling down (next ready in ${remainingSec} s)`;
   }
 
-  const isAnalyzeEnabled = isVideoReady && hasKey && isKeyTestedAndValid && !isAnalyzing && isOnline;
+  const isAnalyzeEnabled = isVideoReady && !disabledReason && !isAnalyzing && isOnline;
 
   // Run the full analysis pipeline
   const handleAnalyzeClick = async (force = false) => {
@@ -683,14 +712,31 @@ export function StudioScreen() {
               <Download className="w-4 h-4" />
               <span>Export</span>
             </button>
-            <button
-              type="button"
-              onClick={openSettings}
-              aria-label="Open settings"
-              className="w-11 h-11 flex items-center justify-center rounded-[10px] text-[var(--text-2)] hover:text-[var(--text)] hover:bg-[var(--ink-2)] border border-transparent hover:border-[var(--ink-3)] transition-colors min-h-[44px] min-w-[44px]"
-            >
-              <Settings className="w-5 h-5" />
-            </button>
+            {(() => {
+              const eCount = enabledSlots.length;
+              const rCount = readySlots.length;
+              let dotCol = 'bg-[var(--danger)]';
+              if (eCount > 0 && rCount === eCount) {
+                dotCol = 'bg-[var(--volt)]';
+              } else if (eCount > 0 && rCount > 0) {
+                dotCol = 'bg-[var(--text-2)]';
+              }
+              const tip = `${rCount} of ${eCount} keys ready`;
+              return (
+                <button
+                  type="button"
+                  onClick={openSettings}
+                  aria-label="Open settings"
+                  className="relative w-11 h-11 flex items-center justify-center rounded-[10px] text-[var(--text-2)] hover:text-[var(--text)] hover:bg-[var(--ink-2)] border border-transparent hover:border-[var(--ink-3)] transition-colors min-h-[44px] min-w-[44px]"
+                >
+                  <Settings className="w-5 h-5" />
+                  <span
+                    className={`absolute top-2.5 right-2.5 w-2 h-2 rounded-full ${dotCol}`}
+                    title={tip}
+                  />
+                </button>
+              );
+            })()}
           </div>
         </div>
       </header>

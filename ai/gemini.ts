@@ -1,10 +1,29 @@
 /**
  * Pure REST client for Gemini generateContent and model discovery.
- * - API key strictly in x-goog-api-key header.
- * - Never in URL or exposed in error messages.
- * - Uses generationConfig with thinkingConfig, maxOutputTokens: 4096, and 400-thinking fallback.
- * - Strict timeout, retry, and model fallback chain with 150s total deadline.
+ * - Supports multi-key BYOK automatic rotation and quota scheduling.
+ * - API keys strictly in x-goog-api-key header; NEVER in URLs, console, or error messages.
+ * - Synchronous zero-delay key rotation on 429 quota exhaustion or suspect timeouts.
+ * - Measures real switch time (switchMs).
  */
+
+import {
+  getKeySync,
+  getAllCachedKeys,
+  recordKeyCall,
+  recordKeySuccess,
+  recordKeyFailure,
+  setSlotInvalid,
+  listSlots,
+} from './keyvault';
+import {
+  pickKey,
+  planAttempts,
+  classifyFailure,
+  normalizeModelName,
+  makeCooldownKey,
+  nextMidnightPacific,
+} from './key-scheduler';
+import { useKeyStore, AttemptLog } from '../stores/use-key-store';
 
 const MODELS_CACHE_KEY = 'aiModelsCache';
 const SELECTED_MODEL_KEY = 'sfx_ai_selected_model';
@@ -13,10 +32,21 @@ const NO_THINKING_KEY = 'no-thinking-config';
 export function redactApiKey(text: string, apiKey?: string): string {
   if (!text) return '';
   let cleaned = text;
+
   if (apiKey && apiKey.length > 5) {
     cleaned = cleaned.replaceAll(apiKey, '[REDACTED]');
   }
-  cleaned = cleaned.replace(/AIza[0-9A-Za-z-_]{35}/g, '[REDACTED]');
+
+  // Redact all cached keys from the vault
+  const allKeys = getAllCachedKeys();
+  for (const k of allKeys) {
+    if (k && k.length > 5) {
+      cleaned = cleaned.replaceAll(k, '[REDACTED]');
+    }
+  }
+
+  // Redact general API key patterns
+  cleaned = cleaned.replace(/AIza[0-9A-Za-z-_]{26,44}/g, '[REDACTED]');
   return cleaned;
 }
 
@@ -31,22 +61,14 @@ export function getTodayDateString(): string {
 export function getAiCallsToday(): number {
   if (typeof window === 'undefined') return 0;
   try {
-    const key = `aiCalls:${getTodayDateString()}`;
-    const val = localStorage.getItem(key);
-    return val ? parseInt(val, 10) || 0 : 0;
-  } catch {
-    return 0;
-  }
-}
-
-export function incrementAiCallsToday(): number {
-  if (typeof window === 'undefined') return 0;
-  try {
-    const key = `aiCalls:${getTodayDateString()}`;
-    const current = getAiCallsToday();
-    const updated = current + 1;
-    localStorage.setItem(key, String(updated));
-    return updated;
+    const slots = listSlots();
+    const today = getTodayDateString();
+    return slots.reduce((acc, s) => {
+      if (s.stats?.dayKey === today) {
+        return acc + (s.stats.callsToday || 0);
+      }
+      return acc;
+    }, 0);
   } catch {
     return 0;
   }
@@ -146,17 +168,14 @@ export function rankGeminiModels(models: string[]): string[] {
 }
 
 /**
- * Discover, filter, and rank available Gemini models from Google AI Studio REST API.
- * Never auto-selects *-pro models.
+ * Discovers, filters, and ranks available Gemini models.
+ * If apiKey is omitted, uses any ready key from the scheduler.
  */
 export async function discoverGeminiModels(
-  apiKey: string,
+  apiKey?: string,
   forceRefresh = false
 ): Promise<string[]> {
-  const cleanKey = apiKey.trim();
-  if (!cleanKey) return [];
-
-  // Check 24h cache
+  // Check 24h cache first
   if (!forceRefresh && typeof window !== 'undefined') {
     try {
       const cached = localStorage.getItem(MODELS_CACHE_KEY);
@@ -167,14 +186,26 @@ export async function discoverGeminiModels(
           return parsed.models;
         }
       }
-    } catch {
-      // ignore
+    } catch {}
+  }
+
+  let cleanKey = apiKey ? apiKey.trim() : '';
+
+  if (!cleanKey) {
+    // Pick any ready key from slots
+    const slots = listSlots();
+    const readySlot = slots.find((s) => s.enabled && !s.invalid);
+    if (readySlot) {
+      cleanKey = getKeySync(readySlot.id) || '';
     }
+  }
+
+  if (!cleanKey) {
+    return ['models/gemini-3.8-flash', 'models/gemini-3.7-flash', 'models/gemini-2.5-flash'];
   }
 
   const allModels: { name: string; supportedGenerationMethods?: string[] }[] = [];
   let pageToken: string | undefined = undefined;
-
   const endpointBase = 'https://generativelanguage.googleapis.com/v1beta/models';
 
   do {
@@ -198,9 +229,7 @@ export async function discoverGeminiModels(
         if (body?.error?.message) {
           detail = `${detail} - ${body.error.message}`;
         }
-      } catch {
-        // ignore
-      }
+      } catch {}
       throw new Error(redactApiKey(detail, cleanKey));
     }
 
@@ -225,7 +254,6 @@ export async function discoverGeminiModels(
 
   const ranked = rankGeminiModels(filteredNames);
 
-  // Cache in localStorage
   if (typeof window !== 'undefined' && ranked.length > 0) {
     try {
       localStorage.setItem(
@@ -265,9 +293,6 @@ export interface GeminiGenerateContentRequest {
   };
 }
 
-/**
- * Derives thinkingConfig based on model name and no-thinking status.
- */
 export function getThinkingConfigForModel(
   model: string
 ): { thinkingBudget?: number; thinkingLevel?: string } | undefined {
@@ -277,16 +302,18 @@ export function getThinkingConfigForModel(
   if (lower.includes('2.5-flash') || lower.includes('2.5-flash-lite')) {
     return { thinkingBudget: 0 };
   }
-  if (lower.includes('gemini-3') || lower.includes('gemini-3.') || lower.includes('3.8-flash') || lower.includes('3.7-flash')) {
+  if (
+    lower.includes('gemini-3') ||
+    lower.includes('gemini-3.') ||
+    lower.includes('3.8-flash') ||
+    lower.includes('3.7-flash')
+  ) {
     return { thinkingLevel: 'LOW' };
   }
 
   return undefined;
 }
 
-/**
- * Builds the generateContent body object with thinkingConfig & maxOutputTokens: 4096.
- */
 export function buildGeminiGenerateContentBody(
   parts: GeminiPart[],
   schema: Record<string, any>,
@@ -313,32 +340,43 @@ export function buildGeminiGenerateContentBody(
 
 export interface GeminiCallProgress {
   model: string;
+  keyLabel?: string;
   attempt: number;
   totalAttempts: number;
   elapsedSeconds: number;
   previousReason?: string;
+  rotationLine?: string;
+}
+
+export interface CallGeminiOptions {
+  preferredModel?: string;
+  signal?: AbortSignal;
+  onProgress?: (info: GeminiCallProgress) => void;
+  onToastSwitch?: (msg: string) => void;
 }
 
 /**
- * Calls Gemini REST generateContent with:
- * - 60s per-request timeout
- * - Timeout does NOT retry same model (moves to next model, max 2 models for timeouts)
- * - Network errors & 5xx retry same model ONCE after 2s
- * - 400/401/403 never retry (except 400 thinking error retries once without thinkingConfig)
- * - Total step deadline 150s: throws "The AI did not answer in time. Check your connection, or try again."
+ * Universal dispatcher for Gemini generateContent calls with multi-key automatic rotation.
+ * Supports:
+ * - callGeminiGenerateContent(body, options)
+ * - callGeminiGenerateContent(apiKey, body, options) [backward compatibility]
  */
 export async function callGeminiGenerateContent(
-  apiKey: string,
-  body: GeminiGenerateContentRequest,
-  options?: {
-    preferredModel?: string;
-    signal?: AbortSignal;
-    onProgress?: (info: GeminiCallProgress) => void;
-  }
-): Promise<{ text: string; modelUsed: string; attemptsCount: number }> {
-  const cleanKey = apiKey.trim();
-  if (!cleanKey) {
-    throw new Error('Gemini API key is required.');
+  firstArg: string | GeminiGenerateContentRequest,
+  secondArg?: GeminiGenerateContentRequest | CallGeminiOptions,
+  thirdArg?: CallGeminiOptions
+): Promise<{ text: string; modelUsed: string; keyUsed: string; attemptsCount: number }> {
+  let body: GeminiGenerateContentRequest;
+  let options: CallGeminiOptions | undefined;
+  let singleOverrideKey: string | null = null;
+
+  if (typeof firstArg === 'string') {
+    singleOverrideKey = firstArg.trim();
+    body = secondArg as GeminiGenerateContentRequest;
+    options = thirdArg;
+  } else {
+    body = firstArg;
+    options = secondArg as CallGeminiOptions;
   }
 
   const stepStartMs = performance.now();
@@ -348,12 +386,11 @@ export async function callGeminiGenerateContent(
   // Discover & rank models
   let discovered: string[] = [];
   try {
-    discovered = await discoverGeminiModels(cleanKey);
+    discovered = await discoverGeminiModels(singleOverrideKey || undefined);
   } catch {
     discovered = ['models/gemini-3.8-flash', 'models/gemini-3.7-flash', 'models/gemini-2.5-flash'];
   }
 
-  // Filter out *-pro models for auto selection
   const autoModels = discovered.filter((m) => !/pro/i.test(m));
   if (autoModels.length === 0) {
     autoModels.push('models/gemini-3.8-flash', 'models/gemini-3.7-flash', 'models/gemini-2.5-flash');
@@ -371,223 +408,420 @@ export async function callGeminiGenerateContent(
     candidateModels = autoModels;
   }
 
-  let totalAttemptsCount = 0;
-  let timeoutModelCount = 0;
-  let previousReason: string | undefined = undefined;
-  let lastError: Error | null = null;
+  // Load slots from store/vault
+  let slots = listSlots();
+  if (singleOverrideKey && slots.length === 0) {
+    // Ephemeral single slot if called directly with a key before initialization
+    slots = [
+      {
+        id: 'k1',
+        label: 'Key 1',
+        last4: singleOverrideKey.slice(-4),
+        enabled: true,
+        invalid: false,
+        addedAt: Date.now(),
+        tested: true,
+        stats: {
+          dayKey: getTodayDateString(),
+          callsToday: 0,
+          lastUsedAt: null,
+          lastOkAt: null,
+          lastError: null,
+        },
+      },
+    ];
+  }
 
-  for (let modelIndex = 0; modelIndex < candidateModels.length; modelIndex++) {
+  const enabledSlots = slots.filter((s) => s.enabled && !s.invalid);
+  if (enabledSlots.length === 0 && !singleOverrideKey) {
+    throw new Error('Add a Gemini API key in Settings');
+  }
+
+  // Plan rotation sequence
+  const keyStore = useKeyStore.getState();
+  const cooldownMap = new Map<string, { until: number }>();
+  for (const [k, v] of Object.entries(keyStore.cooldowns)) {
+    if (v && v.until > Date.now()) {
+      cooldownMap.set(k, v);
+    }
+  }
+
+  let plan = planAttempts(candidateModels, slots, cooldownMap, Date.now());
+
+  // Handle allBusy
+  if (plan.allBusy) {
+    const now = Date.now();
+    const waitMs = plan.soonestReadyAt - now;
+
+    if (keyStore.autoRetryWhenBusy && waitMs > 0 && waitMs <= 90000) {
+      // Auto-retry once when wait is <= 90s
+      const waitSeconds = Math.ceil(waitMs / 1000);
+      options?.onProgress?.({
+        model: candidateModels[0],
+        attempt: 1,
+        totalAttempts: 1,
+        elapsedSeconds: 0,
+        previousReason: `All keys cooling down. Auto-retrying in ${waitSeconds}s...`,
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, waitMs + 500));
+
+      // Re-plan after waiting
+      const updatedCooldownMap = new Map<string, { until: number }>();
+      for (const [k, v] of Object.entries(useKeyStore.getState().cooldowns)) {
+        if (v && v.until > Date.now()) {
+          updatedCooldownMap.set(k, v);
+        }
+      }
+      plan = planAttempts(candidateModels, listSlots(), updatedCooldownMap, Date.now());
+    }
+
+    if (plan.allBusy) {
+      const waitSec = Math.max(1, Math.ceil((plan.soonestReadyAt - Date.now()) / 1000));
+      throw new Error(`All keys are at their limit. Next key ready in ${waitSec} s.`);
+    }
+  }
+
+  const attemptsToRun = plan.attempts;
+  let totalAttemptsCount = 0;
+  let previousReason: string | undefined = undefined;
+  let rotationLine = '';
+  let lastError: Error | null = null;
+  let lastFailureDetectedAt = 0;
+
+  for (let i = 0; i < attemptsToRun.length; i++) {
+    const { slot, model: currentModel } = attemptsToRun[i];
+    const modelClean = currentModel.replace(/^models\//, '');
+    const modelPath = normalizeModelName(currentModel);
+    const endpoint = `https://generativelanguage.googleapis.com/v1beta/${modelPath}:generateContent`;
+
     // Stop if total deadline exceeded
     if (performance.now() - stepStartMs >= TOTAL_STEP_DEADLINE_MS) {
       throw new Error('The AI did not answer in time. Check your connection, or try again.');
     }
 
-    // Stop if 2 models have timed out
-    if (timeoutModelCount >= 2) {
-      throw new Error(
-        previousReason
-          ? `AI request failed: ${previousReason}. Check your connection, or try again.`
-          : 'The AI did not answer in time. Check your connection, or try again.'
-      );
+    if (options?.signal?.aborted) {
+      throw new Error('Analysis cancelled by user.');
     }
 
-    const rawModelName = candidateModels[modelIndex];
-    const modelPath = rawModelName.startsWith('models/') ? rawModelName : `models/${rawModelName}`;
-    const endpoint = `https://generativelanguage.googleapis.com/v1beta/${modelPath}:generateContent`;
+    totalAttemptsCount++;
 
-    let modelAttempt = 0;
-    let thinkingFallbackTried = false;
+    // Check for developer simulation interceptor
+    const simulated = useKeyStore.getState().consumeSimulatedFailure(slot.id);
+    if (simulated) {
+      useKeyStore.getState().applyCooldown(slot.id, modelPath, simulated.cooldownMs, simulated.kind);
+      useKeyStore.getState().recordAttempt({
+        time: Date.now(),
+        keyLabel: slot.label,
+        model: modelClean,
+        phase: 'http',
+        result: `simulated 429 (${simulated.kind})`,
+        durationMs: 12,
+        simulated: true,
+      });
 
-    while (modelAttempt < 2) {
-      modelAttempt++;
-      totalAttemptsCount++;
+      const retryInSec = Math.round(simulated.cooldownMs / 1000);
+      const nextAttempt = attemptsToRun[i + 1];
+      if (nextAttempt) {
+        rotationLine = `${slot.label} · ${modelClean} · simulated 429 (${retryInSec}s) -> ${nextAttempt.slot.label}`;
+        previousReason = `simulated 429 on ${slot.label}`;
+      }
+      lastFailureDetectedAt = performance.now();
+      continue;
+    }
+
+    // Retrieve raw key
+    const rawKey = singleOverrideKey || getKeySync(slot.id);
+    if (!rawKey) {
+      continue;
+    }
+
+    // Build model-specific thinking config
+    let currentBody = { ...body };
+    const currentThinkingConfig = getThinkingConfigForModel(modelPath);
+    if (currentThinkingConfig) {
+      currentBody = {
+        ...currentBody,
+        generationConfig: {
+          ...currentBody.generationConfig,
+          thinkingConfig: currentThinkingConfig,
+          maxOutputTokens: 4096,
+        },
+      };
+    } else if (currentBody.generationConfig) {
+      const { thinkingConfig, ...restConfig } = currentBody.generationConfig;
+      currentBody = {
+        ...currentBody,
+        generationConfig: {
+          ...restConfig,
+          maxOutputTokens: 4096,
+        },
+      };
+    }
+
+    // Check if this was a switch from a previous failure
+    if (lastFailureDetectedAt > 0) {
+      const switchMs = Math.round(performance.now() - lastFailureDetectedAt);
+      const prevAttempt = attemptsToRun[i - 1];
+      if (prevAttempt) {
+        const switchInfo = {
+          fromLabel: prevAttempt.slot.label,
+          toLabel: slot.label,
+          reason: previousReason || 'Quota limit',
+          ms: switchMs,
+          at: Date.now(),
+        };
+        useKeyStore.getState().recordSwitch(switchInfo);
+        const switchToast = `${prevAttempt.slot.label} hit its limit — switched to ${slot.label} (${switchMs} ms)`;
+        options?.onToastSwitch?.(switchToast);
+      }
+      lastFailureDetectedAt = 0;
+    }
+
+    const timeoutController = new AbortController();
+    let timedOutFirstByte = false;
+
+    const timeoutId = setTimeout(() => {
+      timedOutFirstByte = true;
+      timeoutController.abort(new Error('First byte timed out'));
+    }, PER_REQUEST_TIMEOUT_MS);
+
+    const abortHandler = () => {
+      timeoutController.abort(new Error('Analysis cancelled by user.'));
+    };
+
+    if (options?.signal) {
+      options.signal.addEventListener('abort', abortHandler);
+    }
+
+    const reqStartMs = performance.now();
+    const progressTimer = setInterval(() => {
+      const elapsed = Math.round((performance.now() - reqStartMs) / 1000);
+      options?.onProgress?.({
+        model: modelPath,
+        keyLabel: slot.label,
+        attempt: totalAttemptsCount,
+        totalAttempts: attemptsToRun.length,
+        elapsedSeconds: elapsed,
+        previousReason,
+        rotationLine,
+      });
+    }, 250);
+
+    let thinkingFallbackRetried = false;
+
+    try {
+      recordKeyCall(slot.id);
+
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': rawKey,
+        },
+        body: JSON.stringify(currentBody),
+        signal: timeoutController.signal,
+      });
+
+      clearInterval(progressTimer);
+      clearTimeout(timeoutId);
+      if (options?.signal) {
+        options.signal.removeEventListener('abort', abortHandler);
+      }
+
+      const reqDurationMs = Math.round(performance.now() - reqStartMs);
+
+      if (response.ok) {
+        const json = await response.json();
+        const candidateText = json?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+        const totalTokens = json?.usageMetadata?.totalTokenCount;
+
+        recordKeySuccess(slot.id);
+        useKeyStore.getState().recordAttempt({
+          time: Date.now(),
+          keyLabel: slot.label,
+          model: modelClean,
+          phase: 'http',
+          result: 'ok',
+          durationMs: reqDurationMs,
+          tokens: totalTokens,
+        });
+
+        return {
+          text: candidateText,
+          modelUsed: modelPath,
+          keyUsed: slot.label,
+          attemptsCount: totalAttemptsCount,
+        };
+      }
+
+      // Handle non-OK response
+      const status = response.status;
+      let errBody: any = null;
+      let rawMsg = `HTTP ${status}`;
+
+      try {
+        errBody = await response.json();
+        if (errBody?.error?.message) {
+          rawMsg = `HTTP ${status} (${errBody.error.message})`;
+        }
+      } catch {}
+
+      const safeMsg = redactApiKey(rawMsg, rawKey);
+
+      // Check for 400 Thinking config error fallback (same key, instant retry)
+      if (
+        status === 400 &&
+        !thinkingFallbackRetried &&
+        /(thinking|thinkingConfig|thinkingLevel|thinkingBudget)/i.test(rawMsg)
+      ) {
+        markNoThinkingModel(modelPath);
+        thinkingFallbackRetried = true;
+        totalAttemptsCount--;
+        i--; // retry same key without thinking
+        continue;
+      }
+
+      const failureTime = performance.now();
+      const failure = classifyFailure(status, errBody, 'http', Date.now());
+
+      recordKeyFailure(slot.id, safeMsg);
+
+      if (failure.kind === 'client-error') {
+        useKeyStore.getState().recordAttempt({
+          time: Date.now(),
+          keyLabel: slot.label,
+          model: modelClean,
+          phase: 'http',
+          result: `client-error (${status})`,
+          durationMs: reqDurationMs,
+        });
+        throw new Error(safeMsg);
+      }
+
+      if (failure.kind === 'network') {
+        useKeyStore.getState().recordAttempt({
+          time: Date.now(),
+          keyLabel: slot.label,
+          model: modelClean,
+          phase: 'upload',
+          result: 'network error',
+          durationMs: reqDurationMs,
+        });
+        throw new Error(safeMsg);
+      }
+
+      if (failure.kind === 'invalid') {
+        setSlotInvalid(slot.id, true, safeMsg);
+        useKeyStore.getState().recordAttempt({
+          time: Date.now(),
+          keyLabel: slot.label,
+          model: modelClean,
+          phase: 'http',
+          result: 'invalid key',
+          durationMs: reqDurationMs,
+        });
+      } else if (failure.kind === 'minute' || failure.kind === 'daily') {
+        useKeyStore.getState().applyCooldown(slot.id, modelPath, failure.cooldownMs, failure.kind);
+        useKeyStore.getState().checkSharedProjectFailure(slot.id, modelPath);
+
+        const reasonLabel = failure.kind === 'minute' ? '429 per-minute' : '429 daily limit';
+        useKeyStore.getState().recordAttempt({
+          time: Date.now(),
+          keyLabel: slot.label,
+          model: modelClean,
+          phase: 'http',
+          result: reasonLabel,
+          durationMs: reqDurationMs,
+        });
+      } else if (failure.kind === 'server') {
+        useKeyStore.getState().applyCooldown(slot.id, modelPath, failure.cooldownMs, 'server');
+        useKeyStore.getState().recordAttempt({
+          time: Date.now(),
+          keyLabel: slot.label,
+          model: modelClean,
+          phase: 'http',
+          result: `5xx server (${status})`,
+          durationMs: reqDurationMs,
+        });
+      }
+
+      const nextAttempt = attemptsToRun[i + 1];
+      if (nextAttempt) {
+        const retrySec =
+          failure.kind === 'minute'
+            ? Math.round((failure as any).cooldownMs / 1000)
+            : 60;
+        rotationLine = `${slot.label} · ${modelClean} · 429 (retry in ${retrySec}s) -> ${nextAttempt.slot.label}`;
+      }
+
+      previousReason = safeMsg;
+      lastError = new Error(safeMsg);
+      lastFailureDetectedAt = failureTime;
+      continue; // Move immediately (synchronously) to the next pair
+    } catch (reqErr) {
+      clearInterval(progressTimer);
+      clearTimeout(timeoutId);
+      if (options?.signal) {
+        options.signal.removeEventListener('abort', abortHandler);
+      }
 
       if (options?.signal?.aborted) {
         throw new Error('Analysis cancelled by user.');
       }
 
-      // Check total deadline before starting request
-      if (performance.now() - stepStartMs >= TOTAL_STEP_DEADLINE_MS) {
-        throw new Error('The AI did not answer in time. Check your connection, or try again.');
-      }
+      const failureTime = performance.now();
+      const reqDurationMs = Math.round(failureTime - reqStartMs);
 
-      // Prepare request body with model-specific thinkingConfig
-      let currentBody = { ...body };
-      const currentThinkingConfig = getThinkingConfigForModel(modelPath);
-      if (currentThinkingConfig) {
-        currentBody = {
-          ...currentBody,
-          generationConfig: {
-            ...currentBody.generationConfig,
-            thinkingConfig: currentThinkingConfig,
-            maxOutputTokens: 4096,
-          },
-        };
-      } else if (currentBody.generationConfig) {
-        const { thinkingConfig, ...restConfig } = currentBody.generationConfig;
-        currentBody = {
-          ...currentBody,
-          generationConfig: {
-            ...restConfig,
-            maxOutputTokens: 4096,
-          },
-        };
-      }
-
-      // Per-request 60s timeout controller
-      const timeoutController = new AbortController();
-      let timedOut = false;
-
-      const timeoutId = setTimeout(() => {
-        timedOut = true;
-        timeoutController.abort(new Error(`timed out after 60 s`));
-      }, PER_REQUEST_TIMEOUT_MS);
-
-      const abortHandler = () => {
-        timeoutController.abort(new Error('Analysis cancelled by user.'));
-      };
-
-      if (options?.signal) {
-        options.signal.addEventListener('abort', abortHandler);
-      }
-
-      const reqStartMs = performance.now();
-      const progressTimer = setInterval(() => {
-        const elapsed = Math.round((performance.now() - reqStartMs) / 1000);
-        options?.onProgress?.({
-          model: modelPath,
-          attempt: totalAttemptsCount,
-          totalAttempts: 3,
-          elapsedSeconds: elapsed,
-          previousReason,
-        });
-      }, 300);
-
-      try {
-        incrementAiCallsToday();
-
-        const response = await fetch(endpoint, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-goog-api-key': cleanKey,
-          },
-          body: JSON.stringify(currentBody),
-          signal: timeoutController.signal,
+      if (timedOutFirstByte) {
+        // Suspect timeout: hung model or silent throttle -> 10 min cooldown
+        useKeyStore.getState().applyCooldown(slot.id, modelPath, 10 * 60 * 1000, 'suspect');
+        useKeyStore.getState().recordAttempt({
+          time: Date.now(),
+          keyLabel: slot.label,
+          model: modelClean,
+          phase: 'first-byte',
+          result: 'suspect timeout',
+          durationMs: reqDurationMs,
         });
 
-        clearInterval(progressTimer);
-        clearTimeout(timeoutId);
-        if (options?.signal) {
-          options.signal.removeEventListener('abort', abortHandler);
+        const nextAttempt = attemptsToRun[i + 1];
+        if (nextAttempt) {
+          rotationLine = `${slot.label} · ${modelClean} · timed out -> ${nextAttempt.slot.label}`;
         }
-
-        if (response.ok) {
-          const json = await response.json();
-          const candidateText = json?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-          if (!candidateText) {
-            throw new Error(`Empty response returned by Gemini model ${modelPath}`);
-          }
-          return { text: candidateText, modelUsed: modelPath, attemptsCount: totalAttemptsCount };
-        }
-
-        // Handle error status
-        const status = response.status;
-        let errorMessage = `HTTP ${status}`;
-        let rawBodyMessage = '';
-
-        try {
-          const errBody = await response.json();
-          if (errBody?.error?.message) {
-            rawBodyMessage = errBody.error.message;
-            errorMessage = `HTTP ${status} (${rawBodyMessage})`;
-          }
-        } catch {
-          // ignore
-        }
-
-        const safeMessage = redactApiKey(errorMessage, cleanKey);
-
-        // Check for 400 Thinking error fallback
-        if (
-          status === 400 &&
-          !thinkingFallbackTried &&
-          /(thinking|thinkingConfig|thinkingLevel|thinkingBudget)/i.test(rawBodyMessage)
-        ) {
-          markNoThinkingModel(modelPath);
-          thinkingFallbackTried = true;
-          totalAttemptsCount--; // Do not count as failure attempt
-          continue; // Retry immediately without thinkingConfig
-        }
-
-        // Non-retryable HTTP 400, 401, 403
-        if (status === 400 || status === 401 || status === 403) {
-          throw new Error(safeMessage);
-        }
-
-        // 404 or 429: break to next model in fallback chain
-        if (status === 404 || status === 429) {
-          previousReason = `HTTP ${status}`;
-          lastError = new Error(safeMessage);
-          break;
-        }
-
-        // HTTP 5xx: retry same model ONCE after 2s delay
-        if (status >= 500 && status < 600) {
-          previousReason = `HTTP ${status}`;
-          if (modelAttempt < 2) {
-            await new Promise((resolve) => setTimeout(resolve, 2000));
-            continue;
-          }
-        }
-
-        previousReason = `HTTP ${status}`;
-        lastError = new Error(safeMessage);
-        break;
-      } catch (reqErr) {
-        clearInterval(progressTimer);
-        clearTimeout(timeoutId);
-        if (options?.signal) {
-          options.signal.removeEventListener('abort', abortHandler);
-        }
-
-        if (options?.signal?.aborted) {
-          throw new Error('Analysis cancelled by user.');
-        }
-
-        if (timedOut) {
-          timeoutModelCount++;
-          previousReason = 'timed out after 60 s';
-          lastError = new Error('timed out after 60 s');
-          // A timeout MUST NOT retry the same model -> break to next model
-          break;
-        }
-
-        const msg = redactApiKey((reqErr as Error).message || 'Network error', cleanKey);
-        lastError = new Error(msg);
-        previousReason = msg.includes('HTTP') ? msg : 'Network error';
-
-        if (
-          msg.includes('HTTP 400') ||
-          msg.includes('HTTP 401') ||
-          msg.includes('HTTP 403') ||
-          msg.includes('cancelled')
-        ) {
-          throw lastError;
-        }
-
-        // Network error: retry same model ONCE after 2s
-        if (modelAttempt < 2) {
-          await new Promise((resolve) => setTimeout(resolve, 2000));
-          continue;
-        }
-        break;
+        previousReason = 'First byte timed out';
+        lastError = new Error('First byte timed out after 60 s');
+        lastFailureDetectedAt = failureTime;
+        continue;
       }
+
+      const msg = redactApiKey((reqErr as Error).message || 'Network error', rawKey);
+      lastError = new Error(msg);
+
+      if (
+        msg.includes('HTTP 400') &&
+        !msg.includes('API_KEY_INVALID') &&
+        !msg.includes('API key not valid')
+      ) {
+        throw lastError; // Client error: do not rotate
+      }
+
+      if (msg.includes('cancelled')) {
+        throw lastError;
+      }
+
+      // Network error: do not rotate
+      useKeyStore.getState().recordAttempt({
+        time: Date.now(),
+        keyLabel: slot.label,
+        model: modelClean,
+        phase: 'upload',
+        result: 'network error',
+        durationMs: reqDurationMs,
+      });
+
+      throw lastError;
     }
-  }
-
-  if (performance.now() - stepStartMs >= TOTAL_STEP_DEADLINE_MS) {
-    throw new Error('The AI did not answer in time. Check your connection, or try again.');
   }
 
   throw lastError || new Error('The AI did not answer in time. Check your connection, or try again.');
@@ -597,7 +831,7 @@ export async function callGeminiGenerateContent(
  * Sends a tiny text-only request ("Reply with OK") to test model latency in Settings.
  */
 export async function testAiSpeed(
-  apiKey: string,
+  apiKey?: string,
   preferredModel?: string
 ): Promise<{ latencyMs: number; modelUsed: string }> {
   const start = performance.now();
@@ -613,7 +847,12 @@ export async function testAiSpeed(
     },
   };
 
-  const res = await callGeminiGenerateContent(apiKey, body, { preferredModel });
+  const res = await callGeminiGenerateContent(
+    apiKey ? apiKey : body,
+    apiKey ? body : { preferredModel },
+    apiKey ? { preferredModel } : undefined
+  );
+
   const latencyMs = Math.round(performance.now() - start);
   return { latencyMs, modelUsed: res.modelUsed };
 }

@@ -1,8 +1,8 @@
-'use client';
-
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useAnalysisStore, StepStatus } from '@/stores/use-analysis-store';
 import { useAppStore } from '@/stores/use-app-store';
+import { useKeyStore } from '@/stores/use-key-store';
+import { useToast } from '@/components/Toast';
 import { useShallow } from 'zustand/react/shallow';
 import {
   ArrowLeft,
@@ -73,6 +73,19 @@ export function AnalyzingScreen() {
       setScreen: s.setScreen,
     }))
   );
+
+  const { showToast } = useToast();
+  const lastSwitch = useKeyStore((s) => s.lastSwitch);
+  const lastSwitchRef = useRef<number>(0);
+
+  useEffect(() => {
+    if (lastSwitch && lastSwitch.at > lastSwitchRef.current) {
+      lastSwitchRef.current = lastSwitch.at;
+      showToast(
+        `${lastSwitch.fromLabel} hit its limit — switched to ${lastSwitch.toLabel} (${lastSwitch.ms} ms)`
+      );
+    }
+  }, [lastSwitch, showToast]);
 
   const currentTime = useCurrentTime(running, 250);
   const project = projects.find((p) => p.id === activeProjectId);
@@ -229,12 +242,32 @@ export function AnalyzingScreen() {
                 <div className="flex items-start justify-between gap-3">
                   <div className="flex items-start gap-3">
                     <StatusIcon status={step.status} />
-                    <div>
-                      <h2 className="text-sm font-semibold text-[var(--text)] leading-tight">
-                        {step.label}
-                      </h2>
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <h2 className="text-sm font-semibold text-[var(--text)] leading-tight">
+                          {step.label}
+                        </h2>
+
+                        {/* AI Step: Active Key Chip */}
+                        {step.id === 'ai' && step.status === 'running' && (() => {
+                          const match = step.detail?.match(/(Key\s*\d+)\s*·\s*model\s*([^\s·(]+)/i);
+                          if (match) {
+                            return (
+                              <span className="px-2 py-0.5 rounded-full text-[10px] font-mono bg-[var(--volt)]/15 border border-[var(--volt)]/40 text-[var(--volt)]">
+                                {match[1]} · {match[2].replace(/^models\//, '')}
+                              </span>
+                            );
+                          }
+                          return null;
+                        })()}
+                      </div>
+
                       {step.detail && (
-                        <p className="text-xs text-[var(--text-2)] mt-1 font-mono">
+                        <p className={`text-xs mt-1 font-mono leading-relaxed ${
+                          step.detail.includes('->')
+                            ? 'text-[var(--volt)] font-medium animate-pulse'
+                            : 'text-[var(--text-2)]'
+                        }`}>
                           {step.detail}
                         </p>
                       )}

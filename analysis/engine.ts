@@ -40,10 +40,12 @@ export async function runAnalysisEngine(
 ): Promise<AnalysisEngineResult | null> {
   const store = useAnalysisStore.getState();
   const fileKey = `${project.size}_${project.lastModified || project.createdAt}`;
-  const apiKey = options?.apiKey || useAppStore.getState().apiKey;
+  const { listSlots } = await import('@/ai/keyvault');
+  const slots = listSlots().filter((s) => s.enabled && !s.invalid);
+  const legacyKey = options?.apiKey || useAppStore.getState().apiKey;
 
-  if (!apiKey || !apiKey.trim()) {
-    throw new Error('Gemini API key is required. Please enter and test your key in Settings.');
+  if (slots.length === 0 && (!legacyKey || !legacyKey.trim())) {
+    throw new Error('Add a Gemini API key in Settings');
   }
 
   // Always start the full pipeline
@@ -302,7 +304,7 @@ export async function runAnalysisEngine(
     });
 
     const directorResult = await runAiDirector(bundle, {
-      apiKey,
+      apiKey: legacyKey,
       preferredModel: options?.preferredModel,
       signal: abortController.signal,
       onProgress: (detail) => {

@@ -169,10 +169,11 @@ Return JSON only.`;
 }
 
 export interface RunAiDirectorOptions {
-  apiKey: string;
+  apiKey?: string;
   preferredModel?: string;
   signal?: AbortSignal;
   onProgress?: (detail: string) => void;
+  onToastSwitch?: (msg: string) => void;
 }
 
 export interface DirectorDirectorResult {
@@ -183,9 +184,9 @@ export interface DirectorDirectorResult {
 
 export async function runAiDirector(
   bundle: AnalysisBundle,
-  options: RunAiDirectorOptions
+  options: RunAiDirectorOptions = {}
 ): Promise<DirectorDirectorResult> {
-  const { apiKey, preferredModel, signal, onProgress } = options;
+  const { apiKey, preferredModel, signal, onProgress, onToastSwitch } = options;
 
   const prepareStart = performance.now();
   onProgress?.(`Optimizing payload (max 60 frames @ 320px + audio)...`);
@@ -256,16 +257,22 @@ export async function runAiDirector(
   let responseData: { text: string; modelUsed: string; attemptsCount: number };
 
   try {
-    responseData = await callGeminiGenerateContent(apiKey, requestBody, {
+    responseData = await callGeminiGenerateContent(requestBody, {
       preferredModel,
       signal,
+      onToastSwitch,
       onProgress: (prog: GeminiCallProgress) => {
+        if (prog.rotationLine) {
+          onProgress?.(prog.rotationLine);
+          return;
+        }
         const prevText = prog.previousReason
           ? ` · previous: ${prog.previousReason}`
           : '';
         const modelClean = prog.model.replace(/^models\//, '');
+        const keyPrefix = prog.keyLabel ? `${prog.keyLabel} · ` : '';
         onProgress?.(
-          `Attempt ${prog.attempt} of ${prog.totalAttempts} · model ${modelClean}${prevText} (${prog.elapsedSeconds}s)`
+          `${keyPrefix}Attempt ${prog.attempt} of ${prog.totalAttempts} · model ${modelClean}${prevText} (${prog.elapsedSeconds}s)`
         );
       },
     });
@@ -295,9 +302,10 @@ export async function runAiDirector(
       0.2,
       responseData.modelUsed
     );
-    responseData = await callGeminiGenerateContent(apiKey, retryBody, {
+    responseData = await callGeminiGenerateContent(retryBody, {
       preferredModel: responseData.modelUsed,
       signal,
+      onToastSwitch,
       onProgress: (prog: GeminiCallProgress) => {
         const modelClean = prog.model.replace(/^models\//, '');
         onProgress?.(`Retrying JSON with ${modelClean}... (${prog.elapsedSeconds}s)`);

@@ -15,6 +15,9 @@ export default function Page() {
 
   useEffect(() => {
     loadProjects();
+    import('@/stores/use-key-store').then(({ useKeyStore }) => {
+      useKeyStore.getState().init();
+    });
   }, [loadProjects]);
 
   return (

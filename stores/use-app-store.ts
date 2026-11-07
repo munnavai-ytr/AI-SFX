@@ -166,6 +166,12 @@ export const useAppStore = create<AppState>((set, get) => ({
   loadProjects: async () => {
     set({ isLoadingProjects: true });
     await requestStoragePersistence();
+    try {
+      const { useKeyStore } = await import('@/stores/use-key-store');
+      await useKeyStore.getState().init();
+    } catch (err) {
+      console.warn('Failed to initialize key store:', err);
+    }
     const stored = await getStoredProjects();
     set({ projects: stored, isLoadingProjects: false });
   },

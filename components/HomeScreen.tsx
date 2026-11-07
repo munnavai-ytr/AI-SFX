@@ -1,11 +1,12 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useAppStore } from '@/stores/use-app-store';
+import { useKeyStore } from '@/stores/use-key-store';
 import { pickVideo } from '@/platform/pick-video';
 import { useToast } from '@/components/Toast';
 import { formatDuration, formatDate } from '@/lib/format';
-import { Settings, Plus, Film, Trash2, AlertTriangle, Loader2 } from 'lucide-react';
+import { Settings, Plus, Film, Trash2, AlertTriangle, Loader2, Key, ExternalLink } from 'lucide-react';
 
 import { useShallow } from 'zustand/react/shallow';
 
@@ -28,9 +29,45 @@ export function HomeScreen() {
     }))
   );
 
+  const { slots, cooldowns } = useKeyStore(
+    useShallow((s) => ({
+      slots: s.slots,
+      cooldowns: s.cooldowns,
+    }))
+  );
+
   const { showToast } = useToast();
   const [isDragging, setIsDragging] = useState(false);
   const [isProcessingFile, setIsProcessingFile] = useState(false);
+
+  const [now, setNow] = useState(() => (typeof window !== 'undefined' ? Date.now() : 0));
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+  const enabledSlots = slots.filter((s) => s.enabled);
+  const readySlots = enabledSlots.filter((s) => {
+    if (s.invalid) return false;
+    // Check if cooling down
+    const isCooling = Object.entries(cooldowns).some(
+      ([k, v]) => k.startsWith(`${s.id}|`) && v && v.until > now
+    );
+    return !isCooling;
+  });
+
+  const enabledCount = enabledSlots.length;
+  const readyCount = readySlots.length;
+
+  let dotColor = 'bg-[var(--danger)]';
+  if (enabledCount > 0 && readyCount === enabledCount) {
+    dotColor = 'bg-[var(--volt)]';
+  } else if (enabledCount > 0 && readyCount > 0) {
+    dotColor = 'bg-[var(--text-2)]';
+  } else {
+    dotColor = 'bg-[var(--danger)]';
+  }
+
+  const dotTooltip = `${readyCount} of ${enabledCount} keys ready`;
 
   const handlePickVideo = async () => {
     if (isProcessingFile) return;
@@ -117,15 +154,61 @@ export function HomeScreen() {
             type="button"
             onClick={openSettings}
             aria-label="Settings"
-            className="w-11 h-11 flex items-center justify-center rounded-[10px] text-[var(--text-2)] hover:text-[var(--text)] hover:bg-[var(--ink-2)] border border-transparent hover:border-[var(--ink-3)] transition-colors min-h-[44px] min-w-[44px]"
+            className="relative w-11 h-11 flex items-center justify-center rounded-[10px] text-[var(--text-2)] hover:text-[var(--text)] hover:bg-[var(--ink-2)] border border-transparent hover:border-[var(--ink-3)] transition-colors min-h-[44px] min-w-[44px]"
           >
             <Settings className="w-5 h-5" />
+            <span
+              className={`absolute top-2.5 right-2.5 w-2 h-2 rounded-full ${dotColor}`}
+              title={dotTooltip}
+            />
           </button>
         </div>
       </header>
 
       {/* Main Body */}
       <main className="flex-1 max-w-4xl w-full mx-auto px-4 sm:px-8 py-6 sm:py-8 space-y-8 safe-padding-bottom">
+        {/* First-run empty state if no keys configured */}
+        {slots.length === 0 && (
+          <div className="p-5 rounded-[var(--radius)] bg-[var(--ink-2)] border border-[var(--volt)]/50 space-y-3">
+            <div className="flex items-center gap-2.5">
+              <div className="w-8 h-8 rounded-[8px] bg-[var(--volt)]/15 flex items-center justify-center text-[var(--volt)]">
+                <Key className="w-4 h-4" />
+              </div>
+              <h3 className="text-sm font-bold text-[var(--text)]">
+                Add your Gemini API key to start
+              </h3>
+            </div>
+            <ol className="text-xs text-[var(--text-2)] space-y-2 list-decimal list-inside leading-relaxed">
+              <li>
+                Get a free key at{' '}
+                <a
+                  href="https://aistudio.google.com/apikey"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-[var(--volt)] hover:underline inline-flex items-center gap-0.5"
+                >
+                  <span>aistudio.google.com/apikey</span>
+                  <ExternalLink className="w-3 h-3" />
+                </a>
+              </li>
+              <li>
+                Create each key in a separate Google project (AI Studio &rarr; Create API key &rarr; &ldquo;in new project&rdquo;) so each key gets its own independent quota.
+              </li>
+              <li>
+                Add 2&ndash;3 keys in Settings for automatic, seamless quota rotation without interruptions.
+              </li>
+            </ol>
+            <button
+              type="button"
+              onClick={openSettings}
+              className="mt-1 px-4 py-2 rounded-[8px] bg-[var(--volt)] text-[var(--volt-ink)] text-xs font-semibold hover:opacity-95 transition-opacity inline-flex items-center gap-1.5"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>Add API Key in Settings</span>
+            </button>
+          </div>
+        )}
+
         {/* Upload Drop Zone / Button */}
         <section aria-labelledby="upload-section-title">
           <h2 id="upload-section-title" className="sr-only">Upload video</h2>
