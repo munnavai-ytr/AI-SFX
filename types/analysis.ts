@@ -1,3 +1,8 @@
+export interface FrameSample {
+  t: number;
+  jpeg: Blob;
+}
+
 export interface AnalysisBundle {
   projectId: string;
   fileKey: string;
@@ -12,7 +17,7 @@ export interface AnalysisBundle {
   transients: { t: number; strengthDb: number }[];
   quietGaps: { start: number; end: number }[];
   cuts: { t: number; strength: number }[];
-  samples: { t: number; jpeg: Blob }[]; // 1 frame/second, 384 px wide, JPEG q 0.7
+  samples: FrameSample[]; // 1 frame/second, 384 px wide, JPEG q 0.7
   stats: {
     audioBytes: number;
     frameBytes: number;

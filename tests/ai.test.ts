@@ -11,8 +11,9 @@ import {
   isNoThinkingModel,
   markNoThinkingModel,
 } from '../ai/gemini';
-import { selectEquallySpacedSamples } from '../ai/director';
+import { selectEquallySpacedSamples, generateRuleBasedPlan } from '../ai/director';
 import { SfxEvent, SpeechSegment } from '../ai/sfx-types';
+import { AnalysisBundle } from '../types/analysis';
 
 describe('snapEvents', () => {
   const cuts = [1.5, 4.0, 8.2];
@@ -162,12 +163,15 @@ describe('rankGeminiModels', () => {
 });
 
 describe('thinkingConfig logic', () => {
-  it('assigns thinkingBudget: 0 for 2.5 flash and thinkingLevel: LOW for gemini-3*', () => {
+  it('assigns thinkingBudget: 0 for 2.5 flash and lowercase thinkingLevel: low for gemini-3*', () => {
     const config25 = getThinkingConfigForModel('gemini-2.5-flash');
     expect(config25).toEqual({ thinkingBudget: 0 });
 
     const config38 = getThinkingConfigForModel('gemini-3.8-flash');
-    expect(config38).toEqual({ thinkingLevel: 'LOW' });
+    expect(config38).toEqual({ thinkingLevel: 'low' });
+
+    const configLite = getThinkingConfigForModel('gemini-3.1-flash-lite');
+    expect(configLite).toEqual({ thinkingLevel: 'minimal' });
   });
 
   it('omits thinkingConfig if model is marked in no-thinking-config', () => {
@@ -177,14 +181,25 @@ describe('thinkingConfig logic', () => {
     const config = getThinkingConfigForModel('models/gemini-3.7-flash');
     expect(config).toBeUndefined();
   });
+
+  it('omits temperature for Gemini 3+ and sets maxOutputTokens 8192', () => {
+    const body38 = buildGeminiGenerateContentBody([], {}, 0.2, 'gemini-3.8-flash');
+    expect(body38.generationConfig?.temperature).toBeUndefined();
+    expect(body38.generationConfig?.maxOutputTokens).toBe(8192);
+    expect(body38.generationConfig?.mediaResolution).toBe('MEDIA_RESOLUTION_MEDIUM');
+
+    const body25 = buildGeminiGenerateContentBody([], {}, 0.2, 'gemini-2.5-flash');
+    expect(body25.generationConfig?.temperature).toBe(0.2);
+    expect(body25.generationConfig?.maxOutputTokens).toBe(4096);
+  });
 });
 
-describe('sample frame downsampling', () => {
-  it('selects at most 60 evenly spaced samples', () => {
+describe('sample frame downsampling and contact sheets', () => {
+  it('selects at most 54 or 60 evenly spaced samples', () => {
     const dummySamples = Array.from({ length: 150 }, (_, i) => i);
-    const selected = selectEquallySpacedSamples(dummySamples, 60);
+    const selected = selectEquallySpacedSamples(dummySamples, 54);
 
-    expect(selected.length).toBe(60);
+    expect(selected.length).toBe(54);
     expect(selected[0]).toBe(0);
     expect(selected[selected.length - 1]).toBe(149);
   });
@@ -277,5 +292,41 @@ describe('callGeminiGenerateContent retry and timeout policies', () => {
     await expect(promise).rejects.toThrow('The AI did not answer in time. Check your connection, or try again.');
 
     vi.useRealTimers();
+  });
+});
+
+describe('generateRuleBasedPlan', () => {
+  it('generates a rule-based plan with whoosh_fast for cuts (0.6 conf) and impact_soft for spikes (0.5 conf)', () => {
+    const mockBundle: Partial<AnalysisBundle> = {
+      projectId: 'proj-123',
+      createdAt: 1000,
+      duration: 10.0,
+      hasAudio: true,
+      cuts: [
+        { t: 1.5, strength: 0.8 },
+        { t: 5.0, strength: 0.9 },
+      ],
+      transients: [
+        { t: 2.5, strengthDb: 18.2 },
+        { t: 7.0, strengthDb: 22.4 },
+      ],
+      samples: [],
+    };
+
+    const plan = generateRuleBasedPlan(mockBundle as AnalysisBundle);
+
+    expect(plan.model).toBe('rule-based (no AI)');
+    expect(plan.needsSfx).toBe(true);
+    expect(plan.candidates.length).toBeGreaterThanOrEqual(4);
+
+    const whooshes = plan.candidates.filter((c) => c.type === 'whoosh_fast');
+    expect(whooshes.length).toBe(2);
+    expect(whooshes[0].confidence).toBe(0.6);
+    expect(whooshes[0].snapped).toBe('cut');
+
+    const impacts = plan.candidates.filter((c) => c.type === 'impact_soft');
+    expect(impacts.length).toBe(2);
+    expect(impacts[0].confidence).toBe(0.5);
+    expect(impacts[0].snapped).toBe('transient');
   });
 });

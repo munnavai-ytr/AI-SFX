@@ -8,22 +8,8 @@ import {
 } from './gemini';
 import { normalizeDirectorResponse } from './repair';
 import { snapEvents, finalizeCandidates } from './snap';
-
-/**
- * Converts a Blob to a raw base64 string safely.
- */
-async function blobToBase64(blob: Blob): Promise<string> {
-  const arrayBuffer = await blob.arrayBuffer();
-  let binary = '';
-  const bytes = new Uint8Array(arrayBuffer);
-  const len = bytes.byteLength;
-  const chunkSize = 0x8000;
-  for (let i = 0; i < len; i += chunkSize) {
-    const chunk = bytes.subarray(i, Math.min(i + chunkSize, len));
-    binary += String.fromCharCode.apply(null, chunk as unknown as number[]);
-  }
-  return btoa(binary);
-}
+import { generateContactSheets, blobToBase64 } from './contact-sheet';
+import { downsampleWav16kTo8k } from './audio-downsample';
 
 /**
  * Selects at most maxCount evenly spaced items from array.
@@ -156,10 +142,11 @@ export function buildDirectorInstructionPrompt(bundle: AnalysisBundle): string {
     .join(', ');
 
   return `You are an award-winning professional video editor doing the sound-effects pass on the attached video. First understand the video: type (vlog, comedy, tutorial, talking head, promo, gaming, travel, emotional, news...), mood, and what happens visually and in the audio.
+The attached images are contact sheets containing up to 9 video frames each arranged in a 3x3 grid (left to right, top to bottom), with the timestamp in seconds marked in the top-left of each tile.
 Then decide whether sound effects would genuinely improve it. Many videos need few or NONE (calm talking head, lecture, emotional speech, already rich sound design). If not needed set needsSfx=false and return an empty events array. Less but right beats more.
-When SFX are useful, return candidate events ranked by importance (at most 16 per minute of video). Use only the allowed types. Typical logic: whoosh at hard cuts and transitions; pop/click/typing when text or graphics appear; impact/boom at dramatic emphasis or sudden zoom; riser before a reveal; real-world action sounds (door, footsteps, camera shutter) only when that action is clearly visible; rimshot/record_scratch for comedy beats; stinger at start/end only for promo-like videos.
+When SFX are useful, return candidate events ranked by importance (at most 16 per minute of video). Return at most 40 events. Use only the allowed types. Typical logic: whoosh at hard cuts and transitions; pop/click/typing when text or graphics appear; impact/boom at dramatic emphasis or sudden zoom; riser before a reveal; real-world action sounds (door, footsteps, camera shutter) only when that action is clearly visible; rimshot/record_scratch for comedy beats; stinger at start/end only for promo-like videos.
 Rules:
-- \`time\` is the exact instant the sound's key moment (hit/peak) should land. Frames are 1 per second, so interpolate carefully and prefer the scene-cut and audio-spike times listed below when an event belongs to one.
+- \`time\` is the exact instant the sound's key moment (hit/peak) should land. Read the tile timestamp badges and interpolate carefully, preferring the scene-cut and audio-spike times listed below when an event belongs to one.
 - Never place an event in the middle of important speech, except transitions or impacts that are clearly intended. Return the speech spans in \`speech\`.
 - Do not repeat the same type within 4 seconds. No more than one event within 0.6 s of another.
 - confidence reflects how sure you are that this exact sound at this exact time improves the video.
@@ -189,10 +176,7 @@ export async function runAiDirector(
   const { apiKey, preferredModel, signal, onProgress, onToastSwitch } = options;
 
   const prepareStart = performance.now();
-  onProgress?.(`Optimizing payload (max 60 frames @ 320px + audio)...`);
-
-  // Select at most 60 evenly spaced frame samples
-  const sampledFrames = selectEquallySpacedSamples(bundle.samples, 60);
+  onProgress?.(`Preparing contact sheets and downsampled audio...`);
 
   const parts: GeminiPart[] = [
     {
@@ -206,8 +190,10 @@ export async function runAiDirector(
 
   let audioBytes = 0;
   if (bundle.hasAudio && bundle.audioWav16k) {
-    audioBytes = bundle.audioWav16k.size;
-    const audioBase64 = await blobToBase64(bundle.audioWav16k);
+    onProgress?.('Downsampling audio to 8 kHz mono WAV...');
+    const audio8kBlob = await downsampleWav16kTo8k(bundle.audioWav16k);
+    audioBytes = audio8kBlob.size;
+    const audioBase64 = await blobToBase64(audio8kBlob);
     parts.push({
       inlineData: {
         mimeType: 'audio/wav',
@@ -216,20 +202,19 @@ export async function runAiDirector(
     });
   }
 
+  onProgress?.('Generating 3x3 contact sheets (max 54 frames)...');
+  const sheets = await generateContactSheets(bundle.samples, 54);
   let framesBytes = 0;
-  for (const sample of sampledFrames) {
+  for (const sheet of sheets) {
     if (signal?.aborted) throw new Error('Analysis cancelled by user.');
-    const resizedBlob = await resampleFrameJpeg(sample.jpeg, 320, 0.6);
-    framesBytes += resizedBlob.size;
-    const frameBase64 = await blobToBase64(resizedBlob);
-
+    framesBytes += sheet.blob.size;
     parts.push({
-      text: `Frame at t=${sample.t.toFixed(2)}s`,
+      text: `Contact sheet ${sheet.sheetIndex} of ${sheet.totalSheets}: ${sheet.frameCount} frames covering t=${sheet.startSec.toFixed(1)}s to t=${sheet.endSec.toFixed(1)}s (reading order: left to right, top to bottom; timestamp marked on each frame).`,
     });
     parts.push({
       inlineData: {
         mimeType: 'image/jpeg',
-        data: frameBase64,
+        data: sheet.base64,
       },
     });
   }
@@ -250,7 +235,7 @@ export async function runAiDirector(
   const totalPayloadMB = Number(((audioBytes + framesBytes) / (1024 * 1024)).toFixed(1));
 
   onProgress?.(
-    `Sending ${sampledFrames.length} frames + audio (${totalPayloadMB} MB) to AI...`
+    `Sending ${sheets.length} contact sheets (${Math.min(54, bundle.samples.length)} frames) + audio (${totalPayloadMB} MB) to AI...`
   );
 
   const uploadStart = performance.now();
@@ -365,5 +350,75 @@ export async function runAiDirector(
     plan,
     snappedCount,
     removedCount,
+  };
+}
+
+/**
+ * Generates an instant, client-side sound effects plan without any AI API call:
+ * - Scene cuts -> whoosh_fast (confidence 0.6)
+ * - Up to 6 strongest audio transient spikes -> impact_soft (confidence 0.5)
+ * - Clearly marked with model 'rule-based (no AI)'
+ */
+export function generateRuleBasedPlan(bundle: AnalysisBundle): SfxPlan {
+  const events: SfxEvent[] = [];
+
+  // 1. Map scene cuts to whoosh_fast (conf 0.6)
+  bundle.cuts.forEach((cut, i) => {
+    events.push({
+      id: `rb-cut-${i}-${Math.round(cut.t * 100)}`,
+      time: cut.t,
+      type: 'whoosh_fast',
+      intent: 'transition',
+      reason: 'Visual scene cut transition',
+      confidence: 0.6,
+      volume: 0.7,
+      snapped: 'cut',
+    });
+  });
+
+  // 2. Map up to 6 strongest audio transients to impact_soft (conf 0.5)
+  if (bundle.hasAudio && bundle.transients.length > 0) {
+    const sorted = [...bundle.transients].sort((a, b) => b.strengthDb - a.strengthDb);
+    const top6 = sorted.slice(0, 6);
+    top6.forEach((tr, i) => {
+      events.push({
+        id: `rb-spike-${i}-${Math.round(tr.t * 100)}`,
+        time: tr.t,
+        type: 'impact_soft',
+        intent: 'emphasis',
+        reason: `Audio transient spike (${tr.strengthDb.toFixed(1)} dB)`,
+        confidence: 0.5,
+        volume: 0.8,
+        snapped: 'transient',
+      });
+    });
+  }
+
+  // Sort by time ascending
+  events.sort((a, b) => a.time - b.time);
+
+  // Avoid placing duplicate events at the exact same timestamp (< 0.1s)
+  const deduped: SfxEvent[] = [];
+  for (const ev of events) {
+    const tooClose = deduped.some((prev) => Math.abs(prev.time - ev.time) < 0.1);
+    if (!tooClose) {
+      deduped.push(ev);
+    }
+  }
+
+  return {
+    projectId: bundle.projectId,
+    bundleCreatedAt: bundle.createdAt,
+    createdAt: Date.now(),
+    model: 'rule-based (no AI)',
+    videoType: 'general',
+    mood: 'neutral',
+    summary: 'Rule-based sound design generated directly from visual scene cuts and audio spike detection.',
+    needsSfx: deduped.length > 0,
+    recommendedDensity: 'balanced',
+    reasoning: 'Generated offline from local video cut detector and audio transient envelopes without AI network call.',
+    speech: [],
+    candidates: deduped,
+    rawResponse: JSON.stringify({ events: deduped }),
   };
 }

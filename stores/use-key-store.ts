@@ -31,10 +31,19 @@ export interface AttemptLog {
   time: number;
   keyLabel: string;
   model: string;
-  phase: 'upload' | 'first-byte' | 'stream' | 'http';
+  phase: 'ping' | 'upload' | 'first-byte' | 'stream' | 'http';
   result: string;
   durationMs: number;
+  uploadedBytes?: number;
+  uploadMs?: number;
+  waitMs?: number;
+  receiveMs?: number;
   tokens?: number;
+  tokensIn?: number;
+  tokensThought?: number;
+  tokensOut?: number;
+  temperature?: number;
+  thinkingConfig?: string;
   simulated?: boolean;
 }
 

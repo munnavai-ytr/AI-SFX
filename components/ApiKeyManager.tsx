@@ -582,15 +582,17 @@ export function ApiKeyManager() {
                 No recorded attempts yet.
               </div>
             ) : (
-              <div className="overflow-x-auto max-h-48 text-[11px] font-mono">
-                <table className="w-full text-left">
+              <div className="overflow-x-auto max-h-56 text-[11px] font-mono">
+                <table className="w-full text-left whitespace-nowrap">
                   <thead className="bg-[var(--ink-2)] border-b border-[var(--ink-3)] text-[var(--text-2)]">
                     <tr>
                       <th className="p-2">Time</th>
                       <th className="p-2">Key</th>
                       <th className="p-2">Model</th>
+                      <th className="p-2">Phase</th>
                       <th className="p-2">Result</th>
-                      <th className="p-2 text-right">ms</th>
+                      <th className="p-2 text-right">Timing (up/wait/rx)</th>
+                      <th className="p-2 text-right">Tokens</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[var(--ink-3)]/40">
@@ -607,8 +609,13 @@ export function ApiKeyManager() {
                             </span>
                           )}
                         </td>
-                        <td className="p-2 text-[var(--text-2)] truncate max-w-[120px]">
+                        <td className="p-2 text-[var(--text-2)] truncate max-w-[130px]">
                           {att.model}
+                        </td>
+                        <td className="p-2 text-[var(--text-2)]">
+                          <span className="px-1.5 py-0.5 rounded bg-[var(--ink-3)] text-[10px]">
+                            {att.phase || 'http'}
+                          </span>
                         </td>
                         <td className="p-2">
                           <span
@@ -621,8 +628,15 @@ export function ApiKeyManager() {
                             {att.result}
                           </span>
                         </td>
-                        <td className="p-2 text-right text-[var(--text-2)]">
-                          {att.durationMs}
+                        <td className="p-2 text-right text-[var(--text-2)] tabular-nums">
+                          {att.uploadMs !== undefined
+                            ? `${att.uploadMs}/${att.waitMs}/${att.receiveMs} ms`
+                            : `${att.durationMs} ms`}
+                        </td>
+                        <td className="p-2 text-right text-[var(--text-2)] tabular-nums">
+                          {att.tokens !== undefined
+                            ? `${att.tokens} ${att.tokensThought ? `(${att.tokensThought} th)` : ''}`
+                            : '—'}
                         </td>
                       </tr>
                     ))}

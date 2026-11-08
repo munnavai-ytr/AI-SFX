@@ -390,3 +390,41 @@ export async function runAnalysisEngine(
     }
   }
 }
+
+/**
+ * Fallback action when AI step fails or times out: generates an instant rule-based plan
+ * from visual scene cuts and audio spikes without calling any external AI API.
+ */
+export async function applyRuleBasedFallback(projectId: string): Promise<AnalysisEngineResult | null> {
+  const store = useAnalysisStore.getState();
+  const bundle = await getAnalysisBundle(projectId);
+  if (!bundle) {
+    throw new Error('No analysis bundle found for this project.');
+  }
+
+  const { generateRuleBasedPlan } = await import('@/ai/director');
+  const plan = generateRuleBasedPlan(bundle);
+  await saveSfxPlan(plan);
+
+  const now = Date.now();
+  store.setStep('ai', {
+    status: 'done',
+    startedAt: now,
+    endedAt: now,
+    progress: 1.0,
+    detail: `Rule-based fallback: generated ${plan.candidates.length} events (cuts & audio peaks)`,
+    error: undefined,
+  });
+
+  store.setStep('place', {
+    status: 'done',
+    startedAt: now,
+    endedAt: now,
+    progress: 1.0,
+    detail: `Placed ${plan.candidates.length} rule-based events on timeline`,
+    error: undefined,
+  });
+
+  store.finish();
+  return { bundle, plan };
+}

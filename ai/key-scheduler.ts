@@ -370,3 +370,181 @@ export function recordQuotaFailureAndCheckSharedProject(
   recentQuotaFailures.push({ slotId, model: normModel, at: now });
   return { shared: false };
 }
+
+const SLOW_MODELS_STORAGE_KEY = 'sfx_ai_slow_models';
+const inMemorySlowModels = new Map<string, number>();
+
+export function getSlowModels(now = Date.now()): Map<string, number> {
+  const map = new Map<string, number>();
+  for (const [m, until] of inMemorySlowModels.entries()) {
+    if (until > now) map.set(m, until);
+  }
+  if (typeof window !== 'undefined') {
+    try {
+      const raw = localStorage.getItem(SLOW_MODELS_STORAGE_KEY);
+      if (raw) {
+        const obj: Record<string, number> = JSON.parse(raw);
+        for (const [m, until] of Object.entries(obj)) {
+          if (until > now) {
+            map.set(normalizeModelName(m), until);
+          }
+        }
+      }
+    } catch {}
+  }
+  return map;
+}
+
+export function markModelSlow(model: string, durationMs = 6 * 60 * 60 * 1000, now = Date.now()): void {
+  const norm = normalizeModelName(model);
+  const until = now + durationMs;
+  inMemorySlowModels.set(norm, until);
+  if (typeof window !== 'undefined') {
+    try {
+      const slowMap = getSlowModels(now);
+      slowMap.set(norm, until);
+      const obj: Record<string, number> = {};
+      for (const [k, v] of slowMap.entries()) {
+        obj[k] = v;
+      }
+      localStorage.setItem(SLOW_MODELS_STORAGE_KEY, JSON.stringify(obj));
+    } catch {}
+  }
+}
+
+export function isModelSlow(model: string, now = Date.now()): boolean {
+  const norm = normalizeModelName(model);
+  const memUntil = inMemorySlowModels.get(norm);
+  if (memUntil && memUntil > now) return true;
+  if (typeof window !== 'undefined') {
+    try {
+      const raw = localStorage.getItem(SLOW_MODELS_STORAGE_KEY);
+      if (raw) {
+        const obj: Record<string, number> = JSON.parse(raw);
+        const until = obj[norm] || obj[model.replace(/^models\//, '')];
+        if (until && until > now) return true;
+      }
+    } catch {}
+  }
+  return false;
+}
+
+export function clearSlowModels(): void {
+  inMemorySlowModels.clear();
+  if (typeof window !== 'undefined') {
+    try {
+      localStorage.removeItem(SLOW_MODELS_STORAGE_KEY);
+    } catch {}
+  }
+}
+
+export type NextAttemptDecision =
+  | { type: 'retry_next_key'; slot: KeySlot; model: string; reason: string }
+  | { type: 'switch_model'; slot: KeySlot; model: string; reason: string }
+  | { type: 'all_busy'; soonestReadyAt: number }
+  | { type: 'stop'; error: string };
+
+export function routeNextAttempt(
+  currentSlot: KeySlot,
+  currentModel: string,
+  failure: Failure,
+  candidateModels: string[],
+  slots: KeySlot[],
+  cooldowns: Map<string, { until: number }>,
+  now = Date.now()
+): NextAttemptDecision {
+  const normModel = normalizeModelName(currentModel);
+
+  // 1. Quota exhaustion (429 minute or daily) -> SAME model, NEXT KEY
+  if (failure.kind === 'minute' || failure.kind === 'daily') {
+    const otherSlots = slots.filter((s) => s.id !== currentSlot.id);
+    const nextSlotOnSameModel = pickKey(otherSlots, normModel, cooldowns, now);
+    if (nextSlotOnSameModel) {
+      return {
+        type: 'retry_next_key',
+        slot: nextSlotOnSameModel,
+        model: normModel,
+        reason: failure.kind === 'minute' ? '429 per-minute' : '429 daily limit',
+      };
+    }
+
+    // No other ready key on same model: try NEXT MODEL
+    const otherModels = candidateModels.map(normalizeModelName).filter((m) => m !== normModel);
+    for (const nextModel of otherModels) {
+      const nextSlot = pickKey(slots, nextModel, cooldowns, now);
+      if (nextSlot) {
+        return {
+          type: 'switch_model',
+          slot: nextSlot,
+          model: nextModel,
+          reason: `Quota limit on ${currentSlot.label} · switching to ${nextModel.replace(/^models\//, '')}`,
+        };
+      }
+    }
+
+    const plan = planAttempts(candidateModels, slots, cooldowns, now);
+    return {
+      type: 'all_busy',
+      soonestReadyAt: plan.soonestReadyAt || now + 60000,
+    };
+  }
+
+  // 2. Invalid key -> NEXT KEY, same model
+  if (failure.kind === 'invalid') {
+    const otherSlots = slots.filter((s) => s.id !== currentSlot.id && s.enabled && !s.invalid);
+    const nextSlot = pickKey(otherSlots, normModel, cooldowns, now);
+    if (nextSlot) {
+      return {
+        type: 'retry_next_key',
+        slot: nextSlot,
+        model: normModel,
+        reason: `Key ${currentSlot.label} is invalid`,
+      };
+    }
+    return {
+      type: 'stop',
+      error: 'All configured API keys are invalid. Check your keys in Settings.',
+    };
+  }
+
+  // 3. First-byte timeout, idle-stream timeout, 5xx / 503 -> Mark model slow for 6 h, NEXT MODEL with SAME KEY
+  if (failure.kind === 'suspect' || failure.kind === 'server') {
+    markModelSlow(normModel, 6 * 60 * 60 * 1000, now);
+
+    const otherModels = candidateModels.map(normalizeModelName).filter((m) => m !== normModel);
+    for (const nextModel of otherModels) {
+      const keyCd = cooldowns.get(makeCooldownKey(currentSlot.id, nextModel));
+      if (!keyCd || keyCd.until <= now) {
+        return {
+          type: 'switch_model',
+          slot: currentSlot,
+          model: nextModel,
+          reason: `${normModel.replace(/^models\//, '')} slow/timed out · switching to ${nextModel.replace(/^models\//, '')} with same key`,
+        };
+      }
+      const altSlot = pickKey(slots, nextModel, cooldowns, now);
+      if (altSlot) {
+        return {
+          type: 'switch_model',
+          slot: altSlot,
+          model: nextModel,
+          reason: `${normModel.replace(/^models\//, '')} slow/timed out · switching to ${nextModel.replace(/^models\//, '')}`,
+        };
+      }
+    }
+
+    return {
+      type: 'stop',
+      error: `Model ${normModel.replace(/^models\//, '')} timed out or was unavailable, and no alternative models were reachable.`,
+    };
+  }
+
+  // 4. Upload stall, network dropped, or client error (other 400): stop, no rotation
+  return {
+    type: 'stop',
+    error:
+      failure.kind === 'network'
+        ? 'Network connection dropped or upload stalled.'
+        : 'Client request parameter error.',
+  };
+}

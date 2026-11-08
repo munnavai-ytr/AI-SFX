@@ -994,9 +994,22 @@ export function StudioScreen() {
             <div className="rounded-[var(--radius)] bg-[var(--ink-2)] border border-[var(--ink-3)] p-5 sm:p-6 space-y-5">
               <div className="flex items-center justify-between">
                 <div>
-                  <h2 className="text-base font-bold text-[var(--text)] tracking-tight">
-                    Sound Effects Mixer
-                  </h2>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h2 className="text-base font-bold text-[var(--text)] tracking-tight">
+                      Sound Effects Mixer
+                    </h2>
+                    {plan && (
+                      plan.model?.includes('rule-based') ? (
+                        <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-amber-500/20 border border-amber-500/50 text-amber-400">
+                          Rule-based
+                        </span>
+                      ) : (
+                        <span className="px-2 py-0.5 rounded-full text-[10px] font-mono bg-[var(--volt)]/15 border border-[var(--volt)]/40 text-[var(--volt)]">
+                          {plan.model.replace(/^models\//, '')}
+                        </span>
+                      )
+                    )}
+                  </div>
                   <p className="text-xs text-[var(--text-2)] mt-0.5">
                     Customize timeline placement, density, and sound variants.
                   </p>

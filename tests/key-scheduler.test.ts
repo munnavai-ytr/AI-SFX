@@ -5,6 +5,10 @@ import {
   nextMidnightPacific,
   planAttempts,
   makeCooldownKey,
+  markModelSlow,
+  isModelSlow,
+  clearSlowModels,
+  routeNextAttempt,
 } from '../ai/key-scheduler';
 import { KeySlot } from '../ai/keyvault';
 
@@ -274,6 +278,105 @@ describe('ai/key-scheduler.ts', () => {
       if (plan.allBusy) {
         expect(plan.soonestReadyAt).toBe(12000);
       }
+    });
+  });
+
+  describe('slow models tracking', () => {
+    beforeEach(() => {
+      clearSlowModels();
+    });
+
+    it('marks model slow for 6 hours', () => {
+      const now = 100000;
+      markModelSlow('gemini-3.8-flash', 6 * 60 * 60 * 1000, now);
+
+      expect(isModelSlow('gemini-3.8-flash', now + 1000)).toBe(true);
+      expect(isModelSlow('models/gemini-3.8-flash', now + 1000)).toBe(true);
+      expect(isModelSlow('gemini-3.8-flash', now + 7 * 60 * 60 * 1000)).toBe(false);
+      expect(isModelSlow('gemini-2.5-flash', now + 1000)).toBe(false);
+    });
+  });
+
+  describe('routeNextAttempt dynamic failure routing', () => {
+    const k1 = baseSlot('k1', 'Key 1', 1000);
+    const k2 = baseSlot('k2', 'Key 2', 2000);
+    const k3 = baseSlot('k3', 'Key 3', 3000);
+    const slots = [k1, k2, k3];
+    const candidateModels = ['models/gemini-3.8-flash', 'models/gemini-3.7-flash', 'models/gemini-2.5-flash'];
+
+    it('on 429 quota: routes to SAME MODEL, NEXT KEY', () => {
+      const cooldowns = new Map<string, { until: number }>();
+      const decision = routeNextAttempt(
+        k1,
+        'models/gemini-3.8-flash',
+        { kind: 'minute', cooldownMs: 30000 },
+        candidateModels,
+        slots,
+        cooldowns,
+        5000
+      );
+
+      expect(decision.type).toBe('retry_next_key');
+      if (decision.type === 'retry_next_key') {
+        expect(decision.model).toBe('models/gemini-3.8-flash');
+        expect(decision.slot.id).toBe('k2'); // next key in LRU order
+      }
+    });
+
+    it('on 400 API key invalid / 401 / 403: routes to NEXT KEY on SAME MODEL', () => {
+      const cooldowns = new Map<string, { until: number }>();
+      const decision = routeNextAttempt(
+        k1,
+        'models/gemini-3.8-flash',
+        { kind: 'invalid' },
+        candidateModels,
+        slots,
+        cooldowns,
+        5000
+      );
+
+      expect(decision.type).toBe('retry_next_key');
+      if (decision.type === 'retry_next_key') {
+        expect(decision.slot.id).toBe('k2');
+      }
+    });
+
+    it('on first-byte timeout / suspect: marks MODEL slow for 6 h and switches to NEXT MODEL with SAME KEY', () => {
+      const cooldowns = new Map<string, { until: number }>();
+      const now = 5000;
+      clearSlowModels();
+
+      const decision = routeNextAttempt(
+        k1,
+        'models/gemini-3.8-flash',
+        { kind: 'suspect', cooldownMs: 10 * 60 * 1000 },
+        candidateModels,
+        slots,
+        cooldowns,
+        now
+      );
+
+      expect(decision.type).toBe('switch_model');
+      if (decision.type === 'switch_model') {
+        expect(decision.model).toBe('models/gemini-3.7-flash'); // Next model
+        expect(decision.slot.id).toBe('k1'); // SAME KEY!
+      }
+      expect(isModelSlow('models/gemini-3.8-flash', now + 1000)).toBe(true);
+    });
+
+    it('on upload stall / client-error: stops immediately without rotating keys or models', () => {
+      const cooldowns = new Map<string, { until: number }>();
+      const decision = routeNextAttempt(
+        k1,
+        'models/gemini-3.8-flash',
+        { kind: 'network' },
+        candidateModels,
+        slots,
+        cooldowns,
+        5000
+      );
+
+      expect(decision.type).toBe('stop');
     });
   });
 });

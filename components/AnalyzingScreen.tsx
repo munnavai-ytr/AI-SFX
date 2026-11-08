@@ -13,6 +13,7 @@ import {
   MinusCircle,
   RotateCcw,
   Play,
+  Wand2,
 } from 'lucide-react';
 
 function formatElapsed(startedAt?: number, endedAt?: number, currentTime?: number): string | null {
@@ -102,6 +103,21 @@ export function AnalyzingScreen() {
       }
     } catch (err) {
       console.error('Analysis execution failed:', err);
+    }
+  };
+
+  const handleUseRuleBasedFallback = async () => {
+    if (!project) return;
+    try {
+      const { applyRuleBasedFallback } = await import('@/analysis/engine');
+      const res = await applyRuleBasedFallback(project.id);
+      if (res) {
+        showToast('Rule-based sound effects placed on timeline');
+        setScreen('studio');
+      }
+    } catch (err: any) {
+      console.error('Failed to generate rule-based fallback:', err);
+      showToast(err?.message || 'Rule-based generation failed');
     }
   };
 
@@ -282,14 +298,26 @@ export function AnalyzingScreen() {
                     )}
 
                     {step.status === 'failed' && (
-                      <button
-                        type="button"
-                        onClick={handleRunFullPipeline}
-                        className="px-3 py-1.5 rounded-[6px] bg-[var(--ink-3)] text-xs font-medium text-[var(--text)] hover:bg-[var(--ink-3)]/80 inline-flex items-center gap-1.5 min-h-[36px]"
-                      >
-                        <RotateCcw className="w-3.5 h-3.5" />
-                        Retry
-                      </button>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        {step.id === 'ai' && (
+                          <button
+                            type="button"
+                            onClick={handleUseRuleBasedFallback}
+                            className="px-3 py-1.5 rounded-[6px] bg-[var(--volt)] text-[var(--volt-ink)] text-xs font-bold hover:opacity-95 transition-opacity inline-flex items-center gap-1.5 min-h-[36px]"
+                          >
+                            <Wand2 className="w-3.5 h-3.5" />
+                            Use rule-based suggestions
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={handleRunFullPipeline}
+                          className="px-3 py-1.5 rounded-[6px] bg-[var(--ink-3)] text-xs font-medium text-[var(--text)] hover:bg-[var(--ink-3)]/80 inline-flex items-center gap-1.5 min-h-[36px]"
+                        >
+                          <RotateCcw className="w-3.5 h-3.5" />
+                          Retry
+                        </button>
+                      </div>
                     )}
                   </div>
                 </div>
